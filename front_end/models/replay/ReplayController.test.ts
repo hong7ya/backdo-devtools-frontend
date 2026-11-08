@@ -30,7 +30,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   for (const kind of ['node', 'page'] as const) {
-    it(`${kind === 'node' ? 'Node' : '콘솔'}에서 이미 해제된 소스가 목록에 남아 있어도 기록과 복원을 유지한다`, async () => {
+    it(`${kind === 'node' ? 'Node' : '콘솔'}에서 과거 사용자 소스의 조회 실패도 원인과 함께 알린다`, async () => {
       const prepared = prepare(kind);
       const {controller, model, script, target, expression} = prepared;
       const expired = new SDK.Script.Script(
@@ -45,13 +45,11 @@ describeWithMockConnection('공통 재실행 제어기', () => {
         model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
       }
       await calibrate(prepared);
-      await pause(model, script, 1);
-      assert.isNull(controller.session.error);
-      assert.isTrue(controller.canReverse(model));
-      await controller.reverse();
-      assert.isNull(controller.session.error);
-      assert.strictEqual(controller.currentPosition?.lineNumber, 0);
-      assert.lengthOf(controller.session.history, 1);
+      assert.include(controller.status, '중단점 위치를 조회하지 못했습니다');
+      assert.include(controller.status, expired.sourceURL);
+      assert.include(controller.status, 'Script not found');
+      assert.isFalse(controller.canReverse(model));
+      assert.lengthOf(controller.session.history, 0);
     });
   }
 
@@ -84,7 +82,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.lengthOf(controller.session.history, 0);
   });
 
-  it('과거 소스를 준비하더라도 스크립트 해제 이외의 오류는 숨기지 않는다', async () => {
+  it('과거 사용자 소스의 연결 오류도 숨기지 않는다', async () => {
     const {controller, model, script} = prepare('node');
     sinon.stub(model, 'scripts').returns([script]);
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({getError: () => 'Connection is closed'});

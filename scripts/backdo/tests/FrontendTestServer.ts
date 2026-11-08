@@ -12,12 +12,19 @@ const CONTENT_TYPES: Record<string, string> = {
   '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2',
 };
 
-/** 빌드된 파일만 제공한다. 사용자 프로세스의 실행이나 별도 server API를 대신 구현하지 않는다. */
-export async function serveTestFrontend(pageSource?: string): Promise<{origin: string, close: () => Promise<void>}> {
+/** 빌드 파일과 테스트용 외부 요청 집계를 제공한다. 사용자 프로세스의 실행이나 별도 server API를 대신 구현하지 않는다. */
+export async function serveTestFrontend(pageSource?: string): Promise<{origin: string, effectCount: () => number, close: () => Promise<void>}> {
   const root = await realpath(process.env.BACKDO_FRONTEND_DIR ?? path.resolve(__dirname, '../../../front_end'));
+  let effects = 0;
   const server = createServer((request, response) => {
     void (async () => {
       const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
+      if (pathname === '/effect') {
+        effects++;
+        response.setHeader('Access-Control-Allow-Origin', '*');
+        response.end('ok');
+        return;
+      }
       if (pageSource && pathname === '/fixture.html') {
         response.setHeader('Content-Type', 'text/html');
         response.end('<!doctype html><meta charset="utf-8"><script src="/fixture.js"></script>');
@@ -42,6 +49,7 @@ export async function serveTestFrontend(pageSource?: string): Promise<{origin: s
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return {
     origin,
+    effectCount: () => effects,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));

@@ -52,15 +52,15 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
 
   updateState({busy, enabled, status, calibrating}:
                   {busy: boolean, enabled: boolean, status: string, calibrating: boolean}): void {
-    this.element.setAttribute('aria-busy', String(busy));
-    this.button.setEnabled(enabled && !busy);
+    this.element.setAttribute('aria-busy', String(busy || calibrating));
+    this.button.setEnabled(enabled && !busy && !calibrating);
     this.#status = status;
-    if (busy) {
-      this.#status = calibrating ? '최초 정지 위치를 다시 열어 복원 시간을 측정하고 있습니다.' : '이전 실행 위치로 복원 중입니다.';
+    if (busy || calibrating) {
+      this.#status = calibrating ? '별도 더미 프로세스에서 CDP 응답 시간을 측정하고 있습니다.' : '이전 실행 위치로 복원 중입니다.';
     }
     this.#loadingLabel.textContent = calibrating ? '측정 중' : '복원 중';
     this.button.setTitle(`${this.#status}\n${this.#usageTitle}`);
-    this.#loading.hidden = !busy;
+    this.#loading.hidden = !busy && !calibrating;
   }
 
   updateUsage(usage: RecordingUsage, error: string|null, estimatedReplayMs: number|null): void {
@@ -69,8 +69,8 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
     const ratio = Math.max(
         ...keys.map(key => usage[key] / REPLAY_LIMITS[key]), (estimatedReplayMs ?? 0) / REPLAY_RESPONSE_BUDGET_MS);
     const percent = Math.min(100, ratio * 100);
-    const timeDescription = estimatedReplayMs === null ? '복원 시간 측정 준비 중' :
-        `예상 복원 약 ${(estimatedReplayMs / 1000).toFixed(1)}초 / 기준 3초 미만`;
+    const timeDescription = estimatedReplayMs === null ? 'CDP 응답 시간 측정 준비 중' :
+        `예상 CDP 처리 약 ${(estimatedReplayMs / 1000).toFixed(1)}초 / 기준 3초 미만 (재시작·코드 실행·화면 표시 제외)`;
     const description = keys.map(key => {
       const unit = key === 'consoleBytes' ? '바이트' : '개';
       return `${USAGE_LABELS[key]} ${usage[key].toLocaleString('ko-KR')} / ${REPLAY_LIMITS[key].toLocaleString('ko-KR')}${unit}`;

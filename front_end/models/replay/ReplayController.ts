@@ -69,7 +69,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #progressListeners = new Set<() => void>();
   #lastPosition: ExecutionPosition|null = null;
   #isReplaying = false;
-  #isCalibrating = false;
+  #calibrationHandler: ((signal: AbortSignal) => Promise<number>)|null = null;
+  #calibrationAbort: AbortController|null = null;
   #resolveReplay: (() => void)|null = null;
   #rejectReplay: ((error: Error) => void)|null = null;
   #refreshReplayTimeout: (() => void)|null = null;
@@ -80,7 +81,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get busy(): boolean {
-    return this.#isReplaying || this.#isCalibrating;
+    return this.#isReplaying;
   }
 
   get currentPosition(): ExecutionPosition|null {
@@ -96,18 +97,19 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get estimatedReplayMs(): number|null {
-    return this.session.history.length ? this.#timing.estimatedMs : null;
+    return this.session.history.length ? this.#timing.estimate(this.session.history.length) : null;
   }
 
-  recordReplayDuration(totalMs: number): void {
-    if (this.session.error) {
-      return;
-    }
-    this.#timing.finishReplay(totalMs);
-    this.#isCalibrating = false;
-    if ((this.#timing.estimatedMs ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
-      this.fail(new Error(REPLAY_TIME_LIMIT_MESSAGE));
-    }
+  get calibrating(): boolean {
+    return this.#calibrationAbort !== null;
+  }
+
+  setCalibrationHandler(measure: ((signal: AbortSignal) => Promise<number>)|null): void {
+    this.#calibrationAbort?.abort();
+    this.#calibrationAbort = null;
+    this.#calibrationHandler = measure;
+    this.#timing = new ReplayTiming();
+    void this.#calibrateIfNeeded();
     this.#notifyStatusChanged();
   }
 
@@ -126,17 +128,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         !this.busy && this.calibrated && this.session.canReverse;
   }
 
-  canCalibrate(model: SDK.DebuggerModel.DebuggerModel|null): boolean {
-    return Boolean(this.#restartTarget) && model === this.#debuggerModel && Boolean(model?.isPaused()) &&
-        !this.busy && !this.calibrated && this.session.canCalibrate;
-  }
-
   get status(): string {
     if (this.session.error) {
       return `뒤로가기 사용 불가: ${this.session.error}`;
     }
-    if (this.#isCalibrating) {
-      return '최초 정지 위치를 다시 열어 복원 시간을 측정하고 있습니다.';
+    if (this.calibrating) {
+      return '별도 더미 프로세스에서 CDP 응답 시간을 측정하고 있습니다.';
     }
     if (this.#isReplaying) {
       return '이전 실행 위치까지 다시 실행하고 있습니다.';
@@ -144,8 +141,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (!this.#restartTarget) {
       return '실행 위치를 기록 중입니다. 뒤로가기는 프로세스 재시작 연동 후 사용할 수 있습니다.';
     }
+    if (!this.#calibrationHandler) {
+      return '별도 더미 프로세스의 측정 연동이 없어 뒤로가기를 사용할 수 없습니다.';
+    }
     if (!this.calibrated) {
-      return '최초 정지 위치에서 복원 시간을 측정한 뒤 사용할 수 있습니다.';
+      return '최초 정지 후 CDP 응답 시간을 측정하면 사용할 수 있습니다.';
     }
     return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' : '기록된 이전 실행 위치가 없습니다.';
   }
@@ -192,22 +192,41 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#notifyStatusChanged();
   }
 
-  async calibrate(): Promise<void> {
-    if (!this.canCalibrate(this.#debuggerModel) || !this.#connectToTarget) {
-      throw new Error(this.status);
+  async #calibrateIfNeeded(): Promise<void> {
+    const measure = this.#calibrationHandler;
+    if (!measure || this.calibrating || this.calibrated || this.session.error ||
+        !this.#debuggerModel?.isPaused() || !this.session.history.length) {
+      return;
     }
-    await this.#restore('calibration');
+    const abort = new AbortController();
+    this.#calibrationAbort = abort;
+    this.#notifyStatusChanged();
+    try {
+      const roundTripMs = await measure(abort.signal);
+      if (abort.signal.aborted) {
+        return;
+      }
+      this.#timing.calibrate(roundTripMs);
+      if ((this.estimatedReplayMs ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
+        this.fail(new Error(REPLAY_TIME_LIMIT_MESSAGE));
+      }
+    } catch (error) {
+      if (!abort.signal.aborted) {
+        this.fail(error);
+      }
+    } finally {
+      if (this.#calibrationAbort === abort) {
+        this.#calibrationAbort = null;
+        this.#notifyStatusChanged();
+      }
+    }
   }
 
   async reverse(): Promise<void> {
     if (!this.canReverse(this.#debuggerModel) || !this.#connectToTarget) {
       throw new Error(this.status);
     }
-    await this.#restore('reverse');
-  }
-
-  async #restore(operation: 'calibration'|'reverse'): Promise<void> {
-    const completion = this.#beginReplay(operation);
+    const completion = this.#beginReplay();
     try {
       // 재실행 진행이 멈춘 연결도 대기 제한에 포함한다. 전체 재실행 시간은 제한하지 않는다.
       await Promise.race([this.#restartAndReplay(completion.promise), completion.promise]);
@@ -269,6 +288,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (this.#isReplaying && !this.session.replaying && !this.session.error) {
         queueMicrotask(() => this.#resolveReplay?.());
       }
+      void this.#calibrateIfNeeded();
       this.#notifyStatusChanged();
     }));
     this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#notifyStatusChanged()));
@@ -299,7 +319,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error(RECORDING_LIMIT_MESSAGE));
       return;
     }
-    this.#timing.cancelPendingExecution();
     this.#consoleBytes += bytes;
     this.#activeConsoleInput = this.#consoleInputs.length;
     this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
@@ -331,14 +350,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     });
   }
 
-  #beginReplay(operation: 'calibration'|'reverse'): {promise: Promise<void>, clearTimeout: () => void} {
-    if (operation === 'calibration') {
-      this.session.beginCalibration();
-    } else {
-      this.session.beginReverse();
-    }
-    this.#isCalibrating = operation === 'calibration';
-    this.#timing.beginReplay();
+  #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
+    this.session.beginReverse();
     this.#replayGeneration++;
     this.#isReplaying = true;
     this.#replayedPositions = 0;
@@ -493,20 +506,15 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const generation = this.#replayGeneration;
       const frame = details.callFrames[0];
       const initial = frame && !this.#scripts.has(frame.script.scriptId);
-      const setupStartedAt = performance.now();
       const script = frame && await this.#recordedScript(frame.script);
       if (generation !== this.#replayGeneration || this.session.error) {
         return false;
-      }
-      if (initial && !this.#isReplaying) {
-        this.#timing.recordSetup(performance.now() - setupStartedAt);
       }
       if (!frame || !script) {
         if (this.#isReplaying) {
           await this.#resumeExecution();
           return true;
         }
-        this.#timing.pauseExecution();
         this.session.unrecordedPause();
         this.#notifyStatusChanged();
         return false;
@@ -526,9 +534,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         userVisible: Boolean(initial) || script.debuggerStatements.has(key) || hitUserBreakpoint || pausedOnException,
       });
       this.#lastPosition = position;
-      this.#timing.pauseExecution();
       if (!this.#isReplaying && this.session.history.canReverse &&
-          (this.#timing.estimatedMs ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
+          (this.#timing.estimate(this.session.history.length) ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
         throw new Error(REPLAY_TIME_LIMIT_MESSAGE);
       }
       if (this.#isReplaying) {
@@ -553,7 +560,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #handleExecutionCommand(command: SDK.DebuggerModel.ExecutionCommand): boolean {
-    if (this.busy || this.canCalibrate(this.#debuggerModel)) {
+    if (this.busy) {
       return true;
     }
     if (this.session.error || !this.#scripts.size) {
@@ -574,7 +581,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #resumeExecution(): Promise<void> {
-    this.#timing.startExecution();
     const response = await this.#debuggerModel?.agent.invoke_resume({terminateOnResume: false});
     if (response?.getError()) {
       throw new Error(response.getError());
@@ -583,7 +589,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #releaseRecording(): void {
-    this.#isCalibrating = false;
+    this.#calibrationAbort?.abort();
+    this.#calibrationAbort = null;
     this.#timing = new ReplayTiming();
     this.#replayGeneration++;
     this.session.history.clear();

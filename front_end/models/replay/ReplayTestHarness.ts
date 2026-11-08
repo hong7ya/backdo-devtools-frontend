@@ -29,6 +29,10 @@ class ReplayTestHarness implements BrowserTestClient {
     ReplayConnection.instance().setLifecycle({
       discover: (port, kind) => window.discoverBackDoTestTarget(port, kind),
       restart: target => window.restartBackDoTestTarget(target),
+      createCalibrationProcess: async kind => {
+        const ws = await window.createBackDoCalibrationProcess(kind);
+        return {ws, dispose: () => window.disposeBackDoCalibrationProcess(ws)};
+      },
     });
   }
 
@@ -37,7 +41,7 @@ class ReplayTestHarness implements BrowserTestClient {
   }
 
   calibrationFinished(): boolean {
-    return !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
+    return !this.#controller.calibrating && !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
         (this.#controller.calibrated || Boolean(this.#controller.session.error));
   }
 

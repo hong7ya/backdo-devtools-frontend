@@ -5,7 +5,7 @@
 import * as Replay from '../../models/replay/replay.js';
 import * as UI from '../../ui/legacy/legacy.js';
 
-const {REPLAY_LIMITS} = Replay.ReplayLimits;
+const {REPLAY_LIMITS, REPLAY_RESPONSE_BUDGET_MS} = Replay.ReplayLimits;
 type RecordingUsage = Replay.ReplayLimits.RecordingUsage;
 // 한도 도달 전에 실행 범위를 조절할 수 있도록 20%를 남겨 두고 안내하는 초기 UI 정책이다.
 const WARNING_USAGE_PERCENT = 80;
@@ -56,16 +56,19 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
     this.#loading.hidden = !busy;
   }
 
-  updateUsage(usage: RecordingUsage, error: string|null): void {
+  updateUsage(usage: RecordingUsage, error: string|null, estimatedReplayMs: number|null): void {
     // 서로 단위가 다른 한도 중 가장 먼저 소진될 항목의 비율을 표시한다. 전체 힙 사용률은 아니다.
     const keys = Object.keys(REPLAY_LIMITS) as Array<keyof RecordingUsage>;
-    const ratio = Math.max(...keys.map(key => usage[key] / REPLAY_LIMITS[key]));
+    const ratio = Math.max(
+        ...keys.map(key => usage[key] / REPLAY_LIMITS[key]), (estimatedReplayMs ?? 0) / REPLAY_RESPONSE_BUDGET_MS);
     const percent = Math.min(100, ratio * 100);
+    const timeDescription = estimatedReplayMs === null ? '복원 시간 측정 준비 중' :
+        `예상 복원 약 ${(estimatedReplayMs / 1000).toFixed(1)}초 / 기준 3초 미만`;
     const description = keys.map(key => {
       const unit = key === 'consoleBytes' ? '바이트' : '개';
       return `${USAGE_LABELS[key]} ${usage[key].toLocaleString('ko-KR')} / ${REPLAY_LIMITS[key].toLocaleString('ko-KR')}${unit}`;
     }).join('\n');
-    const title = error ? `기록 종료 · 저장된 기록 해제\n${error}` : `기록 한도 ${percent.toFixed(1)}% 사용\n${description}`;
+    const title = error ? `기록 종료 · 저장된 기록 해제\n${error}` : `기록 한도 ${percent.toFixed(1)}% 사용\n${timeDescription}\n${description}`;
     this.#meter.setAttribute('aria-valuenow', String(percent));
     this.#meter.setAttribute('aria-valuetext', error ? '기록 종료 · 저장된 기록 해제' : title);
     this.#fill.style.width = `${percent}%`;

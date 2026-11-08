@@ -7,8 +7,15 @@ import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
 import type {ExecutionPosition} from './ExecutionHistory.js';
-import {RECORDING_LIMIT_MESSAGE, type RecordingUsage, REPLAY_LIMITS} from './ReplayLimits.js';
+import {
+  RECORDING_LIMIT_MESSAGE,
+  type RecordingUsage,
+  REPLAY_LIMITS,
+  REPLAY_RESPONSE_BUDGET_MS,
+  REPLAY_TIME_LIMIT_MESSAGE,
+} from './ReplayLimits.js';
 import {ReplaySession} from './ReplaySession.js';
+import {ReplayTiming} from './ReplayTiming.js';
 
 // 30초는 응답 없는 복원을 끝내기 위한 초기 대기 정책이다. 진행이 있으면 다시 계산한다.
 // 기록 보관 시간이나 복원 전체 소요 시간을 제한하는 값은 아니다.
@@ -44,6 +51,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   static #instance: ReplayController;
   readonly session = new ReplaySession();
   #lastUsageNotification = 0;
+  #timing = new ReplayTiming();
   #entryURL = '';
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
@@ -80,6 +88,21 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   get inputCount(): number {
     return this.#consoleInputs.length;
+  }
+
+  get estimatedReplayMs(): number|null {
+    return this.session.history.canReverse ? this.#timing.estimatedMs : null;
+  }
+
+  recordReplayDuration(totalMs: number): void {
+    if (this.session.error) {
+      return;
+    }
+    this.#timing.finishReplay(totalMs);
+    if (this.#timing.estimatedMs >= REPLAY_RESPONSE_BUDGET_MS) {
+      this.fail(new Error(REPLAY_TIME_LIMIT_MESSAGE));
+    }
+    this.#notifyStatusChanged();
   }
 
   get recordingUsage(): RecordingUsage {
@@ -248,6 +271,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error(RECORDING_LIMIT_MESSAGE));
       return;
     }
+    this.#timing.cancelPendingExecution();
     this.#consoleBytes += bytes;
     this.#activeConsoleInput = this.#consoleInputs.length;
     this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
@@ -281,6 +305,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
     this.session.beginReverse();
+    this.#timing.beginReplay();
     this.#replayGeneration++;
     this.#isReplaying = true;
     this.#replayedPositions = 0;
@@ -435,15 +460,20 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const generation = this.#replayGeneration;
       const frame = details.callFrames[0];
       const initial = frame && !this.#scripts.has(frame.script.scriptId);
+      const setupStartedAt = performance.now();
       const script = frame && await this.#recordedScript(frame.script);
       if (generation !== this.#replayGeneration || this.session.error) {
         return false;
+      }
+      if (initial && !this.#isReplaying) {
+        this.#timing.recordSetup(performance.now() - setupStartedAt);
       }
       if (!frame || !script) {
         if (this.#isReplaying) {
           await this.#resumeExecution();
           return true;
         }
+        this.#timing.pauseExecution();
         this.session.unrecordedPause();
         this.#notifyStatusChanged();
         return false;
@@ -463,6 +493,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         userVisible: Boolean(initial) || script.debuggerStatements.has(key) || hitUserBreakpoint || pausedOnException,
       });
       this.#lastPosition = position;
+      this.#timing.pauseExecution();
+      if (!this.#isReplaying && this.session.history.canReverse &&
+          this.#timing.estimatedMs >= REPLAY_RESPONSE_BUDGET_MS) {
+        throw new Error(REPLAY_TIME_LIMIT_MESSAGE);
+      }
       if (this.#isReplaying) {
         this.#replayedPositions++;
         if (!this.session.replaying) {
@@ -506,6 +541,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #resumeExecution(): Promise<void> {
+    this.#timing.startExecution();
     const response = await this.#debuggerModel?.agent.invoke_resume({terminateOnResume: false});
     if (response?.getError()) {
       throw new Error(response.getError());
@@ -514,6 +550,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #releaseRecording(): void {
+    this.#timing = new ReplayTiming();
     this.#replayGeneration++;
     this.session.history.clear();
     this.#consoleInputs = [];

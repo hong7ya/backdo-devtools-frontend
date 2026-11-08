@@ -104,7 +104,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isTrue(await reverseDisabled(session.page));
   }).timeout(60_000);
 
-  it('긴 복원 중에도 로딩이 움직이고 다른 패널로 이동할 수 있다', async () => {
+  it('예측하지 못한 긴 복원에서도 로딩·패널 이동을 유지하고 이후 기록은 종료한다', async () => {
     let releaseRestart: (() => void)|undefined;
     const gate = new Promise<void>(resolve => { releaseRestart = resolve; });
     beforeRestart = () => gate;
@@ -138,7 +138,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       releaseRestart?.();
     }
     await waitForReplay(session.page, previous.length);
-    assert.isNull((await session.page.evaluate(() => window.backdoTest.snapshot())).error);
+    assert.include((await session.page.evaluate(() => window.backdoTest.snapshot())).error ?? '', '예상 복원 시간이 3초');
+    assert.isTrue(await reverseDisabled(session.page));
+    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), 0);
     assert.isNull(await session.page.$(LOADING));
     assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
@@ -289,7 +291,6 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   async function reverseAndVerify(page: Page, previous: HistorySnapshot): Promise<void> {
     const before = currentTarget().session;
     const initialState = await page.evaluate(() => window.backdoTest.snapshot());
-    const startedAt = performance.now();
     const meter = await page.waitForSelector(RECORDING_METER);
     if (!meter) {
       assert.fail('기록 한도 사용률이 보여야 한다');
@@ -297,8 +298,10 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')),
         `실행 위치 ${previous.length.toLocaleString('ko-KR')} /`);
 
+    const startedAt = performance.now();
     await clickReverse(page);
     await waitForReplay(page, previous.length);
+    const elapsedMs = performance.now() - startedAt;
 
     const result = await page.evaluate(() => window.backdoTest.snapshot());
     assert.isNull(result.error);
@@ -319,7 +322,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.notStrictEqual(after.ws, before.ws);
     assert.strictEqual(after.port, before.port);
     assert.strictEqual(result.ws, after.ws.replace(/^ws:\/\//, ''));
-    console.log(`    뒤로가기 완료: ${Math.round(performance.now() - startedAt)}ms`);
+    console.log(`    뒤로가기 완료: ${Math.round(elapsedMs)}ms`);
   }
 
   async function reverseDisabled(page: Page): Promise<boolean> {

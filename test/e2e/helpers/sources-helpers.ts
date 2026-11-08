@@ -76,8 +76,8 @@ export async function toggleDebuggerSidebar(frontend: puppeteer.Page) {
   await frontend.keyboard.up(modifierKey);
 }
 
-export async function getLineNumberElement(lineNumber: number|string) {
-  const visibleLines = await $$(CODE_LINE_SELECTOR);
+export async function getLineNumberElement(lineNumber: number|string, root?: puppeteer.JSHandle) {
+  const visibleLines = await $$(CODE_LINE_SELECTOR, root);
   for (let i = 0; i < visibleLines.length; i++) {
     const lineValue = await visibleLines[i].evaluate(node => node.textContent);
     if (lineValue === `${lineNumber}`) {
@@ -233,22 +233,26 @@ export async function getToolbarText() {
 }
 
 export async function addBreakpointForLine(frontend: puppeteer.Page, index: number|string) {
-  const breakpointLine = await getLineNumberElement(index);
+  const root = await frontend.waitForSelector('html');
+  assertNotNullOrUndefined(root);
+  const breakpointLine = await getLineNumberElement(index, root);
   assertNotNullOrUndefined(breakpointLine);
 
-  await waitForFunction(async () => !(await isBreakpointSet(index)));
+  await waitForFunction(async () => !(await isBreakpointSet(index, root)));
   await clickElement(breakpointLine);
 
-  await waitForFunction(async () => await isBreakpointSet(index));
+  await waitForFunction(async () => await isBreakpointSet(index, root));
 }
 
 export async function removeBreakpointForLine(frontend: puppeteer.Page, index: number|string) {
-  const breakpointLine = await getLineNumberElement(index);
+  const root = await frontend.waitForSelector('html');
+  assertNotNullOrUndefined(root);
+  const breakpointLine = await getLineNumberElement(index, root);
   assertNotNullOrUndefined(breakpointLine);
 
-  await waitForFunction(async () => await isBreakpointSet(index));
+  await waitForFunction(async () => await isBreakpointSet(index, root));
   await clickElement(breakpointLine);
-  await waitForFunction(async () => !(await isBreakpointSet(index)));
+  await waitForFunction(async () => !(await isBreakpointSet(index, root)));
 }
 
 export async function addLogpointForLine(index: number, condition: string) {
@@ -271,8 +275,8 @@ export async function addLogpointForLine(index: number, condition: string) {
   await waitForFunction(async () => await isBreakpointSet(index));
 }
 
-export async function isBreakpointSet(lineNumber: number|string) {
-  const lineNumberElement = await getLineNumberElement(lineNumber);
+export async function isBreakpointSet(lineNumber: number|string, root?: puppeteer.JSHandle) {
+  const lineNumberElement = await getLineNumberElement(lineNumber, root);
   const breakpointLineParentClasses = await lineNumberElement?.evaluate(n => n.className);
   return breakpointLineParentClasses?.includes('cm-breakpoint');
 }

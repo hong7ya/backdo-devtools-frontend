@@ -251,12 +251,15 @@ export async function showVerboseMessages() {
 
 export async function typeIntoConsole(frontend: puppeteer.Page, message: string) {
   const asyncScope = new AsyncScope();
-  const consoleElement = await waitFor(CONSOLE_PROMPT_SELECTOR, undefined, asyncScope);
+  // 전달받은 화면을 사용해 별도 Node·브라우저 테스트 환경에서도 같은 입력 동작을 재사용한다.
+  const root = await frontend.waitForSelector('html');
+  assert.exists(root);
+  const consoleElement = await waitFor(CONSOLE_PROMPT_SELECTOR, root, asyncScope);
   await consoleElement.click();
   await consoleElement.type(message);
   // Wait for autocomplete text to catch up.
   const line = await waitFor('[aria-label="Console prompt"]', consoleElement, asyncScope);
-  const autocomplete = await $(CONSOLE_TOOLTIP_SELECTOR);
+  const autocomplete = await $(CONSOLE_TOOLTIP_SELECTOR, root);
   // The autocomplete element doesn't exist until the first autocomplete suggestion
   // is actually given.
 

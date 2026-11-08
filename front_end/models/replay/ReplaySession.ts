@@ -75,6 +75,12 @@ export class ReplaySession {
     return this.#isAtRecordedPause ? 'show' : 'continue';
   }
 
+  /** 같은 위치의 추가 사용자 정지는 표시하되 실행 위치를 중복 기록하지 않는다. */
+  showUserPause(depth: number, atRecordedPosition: boolean): void {
+    this.#currentDepth = depth;
+    this.#isAtRecordedPause = atRecordedPosition;
+  }
+
   /** 기록 대상 파일 밖의 정지에서는 직전 기록을 현재 위치로 간주하지 않는다. */
   unrecordedPause(): void {
     this.#isAtRecordedPause = false;

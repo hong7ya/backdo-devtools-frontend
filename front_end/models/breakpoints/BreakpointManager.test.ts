@@ -117,6 +117,54 @@ describeWithMockConnection('BreakpointManager', () => {
     return uiLocation?.uiSourceCode ?? null;
   }
 
+  it('조건식·로그포인트·비활성 상태를 보존하며 서버 적용만 해제하고 복구한다', async () => {
+    const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
+    sinon.stub(model.agent, 'invoke_setPauseOnExceptions').resolves({getError: () => undefined});
+    const applied = new Set<Protocol.Debugger.BreakpointId>();
+    const remove = sinon.stub(model.agent, 'invoke_removeBreakpoint').callsFake(async ({breakpointId}) => {
+      applied.delete(breakpointId);
+      return {getError: () => undefined};
+    });
+    let id = 0;
+    const set = sinon.stub(model, 'setBreakpointByURL').callsFake(async () => {
+      const breakpointId = `user-${id++}` as Protocol.Debugger.BreakpointId;
+      applied.add(breakpointId);
+      return {breakpointId, locations: []};
+    });
+    const script = await backend.addScript(target, scriptDescription, null);
+    const source = await uiSourceCodeFromScript(model, script);
+    assert.exists(source);
+    const conditional = await breakpointManager.setBreakpoint(source, 0, 0,
+        'count > 1' as Breakpoints.BreakpointManager.UserCondition, true, false,
+        Breakpoints.BreakpointManager.BreakpointOrigin.USER_ACTION);
+    const logpoint = await breakpointManager.setBreakpoint(source, 1, 0,
+        'count' as Breakpoints.BreakpointManager.UserCondition, true, true,
+        Breakpoints.BreakpointManager.BreakpointOrigin.USER_ACTION);
+    const disabled = await breakpointManager.setBreakpoint(source, 2, 0,
+        Breakpoints.BreakpointManager.EMPTY_BREAKPOINT_CONDITION, false, false,
+        Breakpoints.BreakpointManager.BreakpointOrigin.USER_ACTION);
+    assert.exists(conditional);
+    assert.exists(logpoint);
+    assert.exists(disabled);
+    const savedSettings = () => [...breakpointManager.storage.breakpoints.values()].map(
+        ({resolvedState: _resolvedState, ...settings}) => settings).sort((a, b) => a.lineNumber - b.lineNumber);
+    const saved = savedSettings();
+    const activation = SDK.UserBreakpoints.UserBreakpoints.instance();
+    set.resetHistory();
+    await activation.setSuspended(true);
+    assert.strictEqual(applied.size, 0, '진행 중이던 설정 요청까지 모두 해제해야 한다');
+    assert.isAtLeast(remove.callCount, 2);
+    assert.isTrue(conditional.enabled());
+    assert.isTrue(logpoint.enabled());
+    assert.isFalse(disabled.enabled());
+    assert.deepEqual(savedSettings(), saved);
+    await activation.setSuspended(false);
+    assert.isTrue(set.getCalls().some(call => call.args[3]?.includes('count > 1')));
+    assert.isTrue(set.getCalls().some(call => call.args[3]?.includes('console.log(count)')));
+    assert.isFalse(set.getCalls().some(call => call.args[1] === 2));
+    assert.deepEqual(savedSettings(), saved);
+  });
+
   describe('possibleBreakpoints', () => {
     it('correctly asks the back-end for breakable positions', async () => {
       const debuggerModel = target.model(SDK.DebuggerModel.DebuggerModel);

@@ -85,6 +85,7 @@ import * as StorageKeyManager from './StorageKeyManager.js';
 import * as Target from './Target.js';
 import * as TargetManager from './TargetManager.js';
 import * as TraceObject from './TraceObject.js';
+import * as UserBreakpoints from './UserBreakpoints.js';
 import * as WebAuthnModel from './WebAuthnModel.js';
 
 export {
@@ -164,5 +165,6 @@ export {
   Target,
   TargetManager,
   TraceObject,
+  UserBreakpoints,
   WebAuthnModel,
 };

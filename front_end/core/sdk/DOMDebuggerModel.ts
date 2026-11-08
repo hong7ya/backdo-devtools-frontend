@@ -15,6 +15,7 @@ import {RuntimeModel} from './RuntimeModel.js';
 import {SDKModel} from './SDKModel.js';
 import {Capability, type Target} from './Target.js';
 import {type SDKModelObserver, TargetManager} from './TargetManager.js';
+import {apply, finishUpdates, UserBreakpoints} from './UserBreakpoints.js';
 
 export class DOMDebuggerModel extends SDKModel<EventTypes> {
   readonly agent: ProtocolProxyApi.DOMDebuggerApi;
@@ -83,6 +84,26 @@ export class DOMDebuggerModel extends SDKModel<EventTypes> {
     void this.#domModel.requestDocument();
   }
 
+  async updateDOMBreakpointApplication(): Promise<void> {
+    if (!this.#domBreakpointsSetting.get().length) {
+      return;
+    }
+    if (!UserBreakpoints.instance().suspended) {
+      // 프로세스가 바뀌면 nodeId도 달라진다. 저장된 URL·DOM 경로로 다시 찾는다.
+      await this.documentUpdated();
+      const missing = this.#domBreakpointsSetting.get().some(saved => saved.enabled && saved.url === this.currentURL() &&
+          !this.#domBreakpointsInternal.some(current => current.type === saved.type && current.node.path() === saved.path));
+      if (missing) {
+        throw new Error('DOM 중단점의 요소를 다시 찾지 못했습니다. 중단점 설정은 보존했습니다.');
+      }
+    }
+    await finishUpdates(this.#domBreakpointsInternal.filter(breakpoint => breakpoint.enabled).map(breakpoint => {
+      const params = {nodeId: breakpoint.node.id, type: breakpoint.type};
+      return apply(UserBreakpoints.instance().suspended ? this.agent.invoke_removeDOMBreakpoint(params) :
+                                                       this.agent.invoke_setDOMBreakpoint(params));
+    }));
+  }
+
   domBreakpoints(): DOMBreakpoint[] {
     return this.#domBreakpointsInternal.slice();
   }
@@ -124,12 +145,15 @@ export class DOMDebuggerModel extends SDKModel<EventTypes> {
     } else {
       this.disableDOMBreakpoint(breakpoint);
     }
+    this.saveDOMBreakpoints();
     this.dispatchEventToListeners(Events.DOM_BREAKPOINT_TOGGLED, breakpoint);
   }
 
   private enableDOMBreakpoint(breakpoint: DOMBreakpoint): void {
     if (breakpoint.node.id) {
-      void this.agent.invoke_setDOMBreakpoint({nodeId: breakpoint.node.id, type: breakpoint.type});
+      if (!UserBreakpoints.instance().suspended) {
+        void this.agent.invoke_setDOMBreakpoint({nodeId: breakpoint.node.id, type: breakpoint.type});
+      }
       breakpoint.node.setMarker(Marker, true);
     }
   }
@@ -195,11 +219,9 @@ export class DOMDebuggerModel extends SDKModel<EventTypes> {
     // only once.
     const document = await this.#domModel.requestDocument();
     const currentURL = document ? document.documentURL : Platform.DevToolsPath.EmptyUrlString;
-    for (const breakpoint of this.#domBreakpointsSetting.get()) {
-      if (breakpoint.url === currentURL) {
-        void this.#domModel.pushNodeByPathToFrontend(breakpoint.path).then(appendBreakpoint.bind(this, breakpoint));
-      }
-    }
+    await Promise.all(this.#domBreakpointsSetting.get().filter(breakpoint => breakpoint.url === currentURL).map(
+        breakpoint => this.#domModel.pushNodeByPathToFrontend(breakpoint.path)
+                          .then(appendBreakpoint.bind(this, breakpoint))));
 
     function appendBreakpoint(
         this: DOMDebuggerModel, breakpoint: {
@@ -208,7 +230,7 @@ export class DOMDebuggerModel extends SDKModel<EventTypes> {
         },
         nodeId: Protocol.DOM.NodeId|null): void {
       const node = nodeId ? this.#domModel.nodeForId(nodeId) : null;
-      if (!node) {
+      if (!node || this.hasDOMBreakpoint(node, breakpoint.type)) {
         return;
       }
       const domBreakpoint = new DOMBreakpoint(this, node, breakpoint.type, breakpoint.enabled);
@@ -244,7 +266,7 @@ export class DOMDebuggerModel extends SDKModel<EventTypes> {
   }
 
   private nodeRemoved(event: Common.EventTarget.EventTargetEvent<{node: DOMNode, parent: DOMNode}>): void {
-    if (this.suspended) {
+    if (this.suspended || UserBreakpoints.instance().suspended) {
       return;
     }
     const {node} = event.data;
@@ -498,18 +520,17 @@ export class DOMEventListenerBreakpoint extends CategorizedBreakpoint {
     }
     super.setEnabled(enabled);
     for (const model of TargetManager.instance().models(DOMDebuggerModel)) {
-      this.updateOnModel(model);
+      void this.updateOnModel(model);
     }
   }
 
-  updateOnModel(model: DOMDebuggerModel): void {
-    for (const eventTargetName of this.eventTargetNames) {
-      if (this.enabled()) {
-        void model.agent.invoke_setEventListenerBreakpoint({eventName: this.name, targetName: eventTargetName});
-      } else {
-        void model.agent.invoke_removeEventListenerBreakpoint({eventName: this.name, targetName: eventTargetName});
-      }
-    }
+  async updateOnModel(model: DOMDebuggerModel): Promise<void> {
+    const enabled = this.enabled() && !UserBreakpoints.instance().suspended;
+    await finishUpdates(this.eventTargetNames.map(targetName => {
+      const params = {eventName: this.name, targetName};
+      return apply(enabled ? model.agent.invoke_setEventListenerBreakpoint(params) :
+                             model.agent.invoke_removeEventListenerBreakpoint(params));
+    }));
   }
 
   static readonly listener = 'listener:';
@@ -650,6 +671,9 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
         Category.XHR, ['readystatechange', 'load', 'loadstart', 'loadend', 'abort', 'error', 'progress', 'timeout'],
         ['xmlhttprequest', 'xmlhttprequestupload']);
 
+    UserBreakpoints.instance().register('dom-breakpoints', async () => {
+      await finishUpdates(TargetManager.instance().models(DOMDebuggerModel).map(model => this.updateBreakpointApplication(model)));
+    });
     TargetManager.instance().observeModels(DOMDebuggerModel, this);
   }
 
@@ -662,6 +686,21 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
     }
 
     return domDebuggerManagerInstance;
+  }
+
+  private async updateBreakpointApplication(model: DOMDebuggerModel): Promise<void> {
+    const updates: Promise<void>[] = [model.updateDOMBreakpointApplication()];
+    for (const [url, enabled] of this.#xhrBreakpointsInternal) {
+      if (enabled) {
+        updates.push(apply(UserBreakpoints.instance().suspended ? model.agent.invoke_removeXHRBreakpoint({url}) :
+                                                                model.agent.invoke_setXHRBreakpoint({url})));
+      }
+    }
+    updates.push(...this.#eventListenerBreakpointsInternal.filter(breakpoint => breakpoint.enabled())
+                        .map(breakpoint => breakpoint.updateOnModel(model)));
+    const violationTypes = this.#cspViolationsToBreakOn.filter(breakpoint => breakpoint.enabled()).map(breakpoint => breakpoint.type());
+    updates.push(this.updateCSPViolationBreakpointsForModel(model, violationTypes));
+    await finishUpdates(updates);
   }
 
   cspViolationBreakpoints(): CSPViolationBreakpoint[] {
@@ -703,13 +742,15 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
   updateCSPViolationBreakpoints(): void {
     const violationTypes = this.#cspViolationsToBreakOn.filter(v => v.enabled()).map(v => v.type());
     for (const model of TargetManager.instance().models(DOMDebuggerModel)) {
-      this.updateCSPViolationBreakpointsForModel(model, violationTypes);
+      void this.updateCSPViolationBreakpointsForModel(model, violationTypes);
     }
   }
 
-  private updateCSPViolationBreakpointsForModel(
-      model: DOMDebuggerModel, violationTypes: Protocol.DOMDebugger.CSPViolationType[]): void {
-    void model.agent.invoke_setBreakOnCSPViolation({violationTypes});
+  private async updateCSPViolationBreakpointsForModel(
+      model: DOMDebuggerModel, violationTypes: Protocol.DOMDebugger.CSPViolationType[]): Promise<void> {
+    await apply(model.agent.invoke_setBreakOnCSPViolation({
+      violationTypes: UserBreakpoints.instance().suspended ? [] : violationTypes,
+    }));
   }
 
   xhrBreakpoints(): Map<string, boolean> {
@@ -726,7 +767,7 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
 
   addXHRBreakpoint(url: string, enabled: boolean): void {
     this.#xhrBreakpointsInternal.set(url, enabled);
-    if (enabled) {
+    if (enabled && !UserBreakpoints.instance().suspended) {
       for (const model of TargetManager.instance().models(DOMDebuggerModel)) {
         void model.agent.invoke_setXHRBreakpoint({url});
       }
@@ -737,7 +778,7 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
   removeXHRBreakpoint(url: string): void {
     const enabled = this.#xhrBreakpointsInternal.get(url);
     this.#xhrBreakpointsInternal.delete(url);
-    if (enabled) {
+    if (enabled && !UserBreakpoints.instance().suspended) {
       for (const model of TargetManager.instance().models(DOMDebuggerModel)) {
         void model.agent.invoke_removeXHRBreakpoint({url});
       }
@@ -748,7 +789,7 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
   toggleXHRBreakpoint(url: string, enabled: boolean): void {
     this.#xhrBreakpointsInternal.set(url, enabled);
     for (const model of TargetManager.instance().models(DOMDebuggerModel)) {
-      if (enabled) {
+      if (enabled && !UserBreakpoints.instance().suspended) {
         void model.agent.invoke_setXHRBreakpoint({url});
       } else {
         void model.agent.invoke_removeXHRBreakpoint({url});
@@ -759,17 +800,17 @@ export class DOMDebuggerManager implements SDKModelObserver<DOMDebuggerModel> {
 
   modelAdded(domDebuggerModel: DOMDebuggerModel): void {
     for (const url of this.#xhrBreakpointsInternal.keys()) {
-      if (this.#xhrBreakpointsInternal.get(url)) {
+      if (this.#xhrBreakpointsInternal.get(url) && !UserBreakpoints.instance().suspended) {
         void domDebuggerModel.agent.invoke_setXHRBreakpoint({url});
       }
     }
     for (const breakpoint of this.#eventListenerBreakpointsInternal) {
       if (breakpoint.enabled()) {
-        breakpoint.updateOnModel(domDebuggerModel);
+        void breakpoint.updateOnModel(domDebuggerModel);
       }
     }
     const violationTypes = this.#cspViolationsToBreakOn.filter(v => v.enabled()).map(v => v.type());
-    this.updateCSPViolationBreakpointsForModel(domDebuggerModel, violationTypes);
+    void this.updateCSPViolationBreakpointsForModel(domDebuggerModel, violationTypes);
   }
 
   modelRemoved(_domDebuggerModel: DOMDebuggerModel): void {

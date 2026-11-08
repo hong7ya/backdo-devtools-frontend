@@ -36,6 +36,7 @@ export interface BrowserTestClient {
   calibrationFinished(): boolean;
   historyLength(): number;
   isPaused(): boolean;
+  pauseReason(): string|null;
   isPausedAtLine(lineNumber: number): boolean;
   previous(): HistorySnapshot;
   replayFinished(previousLength: number): boolean;

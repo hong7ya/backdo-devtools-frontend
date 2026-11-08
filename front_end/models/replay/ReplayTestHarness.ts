@@ -41,6 +41,10 @@ class ReplayTestHarness implements BrowserTestClient {
     return this.#debuggerModel()?.isPaused() ?? false;
   }
 
+  pauseReason(): string|null {
+    return this.#debuggerModel()?.debuggerPausedDetails()?.reason ?? null;
+  }
+
   isPausedAtLine(lineNumber: number): boolean {
     return this.#debuggerModel()?.debuggerPausedDetails()?.callFrames[0]?.location().lineNumber === lineNumber;
   }

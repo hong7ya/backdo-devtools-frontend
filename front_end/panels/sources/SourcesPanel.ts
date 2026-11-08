@@ -40,6 +40,7 @@ import * as Protocol from '../../generated/protocol.js';
 import * as Bindings from '../../models/bindings/bindings.js';
 import * as Breakpoints from '../../models/breakpoints/breakpoints.js';
 import * as Extensions from '../../models/extensions/extensions.js';
+import * as Replay from '../../models/replay/replay.js';
 import * as Workspace from '../../models/workspace/workspace.js';
 import * as IconButton from '../../ui/components/icon_button/icon_button.js';
 import * as ObjectUI from '../../ui/legacy/components/object_ui/object_ui.js';
@@ -51,6 +52,7 @@ import * as Snippets from '../snippets/snippets.js';
 import {CallStackSidebarPane} from './CallStackSidebarPane.js';
 import {DebuggerPausedMessage} from './DebuggerPausedMessage.js';
 import {NavigatorView} from './NavigatorView.js';
+import {withReplayTransition} from './ReplayTransition.js';
 import sourcesPanelStyles from './sourcesPanel.css.js';
 import {Events, SourcesView} from './SourcesView.js';
 import {ThreadsSidebarPane} from './ThreadsSidebarPane.js';
@@ -173,17 +175,6 @@ const i18nString = i18n.i18n.getLocalizedString.bind(undefined, str_);
 const primitiveRemoteObjectTypes = new Set(['number', 'boolean', 'bigint', 'undefined']);
 let sourcesPanelInstance: SourcesPanel;
 
-interface FailedResultResponse {
-  result: false;
-}
-interface EnteredResponse {
-  result: true;
-  fullLoopBoundary: {
-    startLocation: Protocol.Debugger.Location,
-    endLocation: Protocol.Debugger.Location,
-  };
-}
-
 export class SourcesPanel extends UI.Panel.Panel implements
     UI.ContextMenu.Provider<Workspace.UISourceCode.UISourceCode|Workspace.UISourceCode.UILocation|
                             SDK.RemoteObject.RemoteObject|SDK.NetworkRequest.NetworkRequest|UISourceCodeFrame>,
@@ -220,6 +211,8 @@ export class SourcesPanel extends UI.Panel.Panel implements
   private extensionSidebarPanesContainer?: UI.View.ViewLocation;
   sidebarPaneView?: UI.Widget.VBox|UI.SplitWidget.SplitWidget;
   #lastPausedTarget: WeakRef<SDK.Target.Target>|null = null;
+  #reverseButton?: UI.Toolbar.ToolbarButton;
+  #reverseTransition = false;
 
   constructor() {
     super('sources');
@@ -330,6 +323,8 @@ export class SourcesPanel extends UI.Panel.Panel implements
         Extensions.ExtensionServer.Events.SidebarPaneAdded, this.extensionSidebarPaneAdded, this);
     SDK.TargetManager.TargetManager.instance().observeTargets(this);
     this.lastModificationTime = -Infinity;
+    Replay.ReplayController.ReplayController.instance().addEventListener(
+        Replay.ReplayController.Events.CHANGED, () => void this.updateDebuggerButtonsAndStatus());
   }
 
   static instance(opts: {
@@ -725,6 +720,17 @@ export class SourcesPanel extends UI.Panel.Panel implements
       this.stepAction.setEnabled(false);
     }
 
+    const replay = Replay.ReplayController.ReplayController.instance();
+    const busy = replay.busy || this.#reverseTransition;
+    this.#reverseButton?.setEnabled(!busy && replay.canReverse(currentDebuggerModel));
+    this.#reverseButton?.setTitle(replay.status);
+    if (busy) {
+      this.togglePauseAction.setEnabled(false);
+      this.stepOverAction.setEnabled(false);
+      this.stepIntoAction.setEnabled(false);
+      this.stepOutAction.setEnabled(false);
+      this.stepAction.setEnabled(false);
+    }
     const details = currentDebuggerModel ? currentDebuggerModel.debuggerPausedDetails() : null;
     await this.debuggerPausedMessage.render(
         details, Bindings.DebuggerWorkspaceBinding.DebuggerWorkspaceBinding.instance(),
@@ -855,1245 +861,68 @@ export class SourcesPanel extends UI.Panel.Panel implements
     const debuggerModel = this.prepareToResume();
     if (debuggerModel) {
       void debuggerModel.stepOut();
-      const details = debuggerModel.debuggerPausedDetails();
-      (details);
     }
     return true;
   }
 
-  async goToPrevLine(): Promise<boolean> {
-    const checkedIsPaused = this.checkPaused();
-    if (!checkedIsPaused.result) {
-      return true;
-    }
-
-    const details = checkedIsPaused.details;
-    const currentDebuggerModel = checkedIsPaused.debuggerModel;
-    const runtimeModel = currentDebuggerModel.runtimeModel();
-
-    const topCallFrame = details.callFrames[0];
-
-    if (!topCallFrame.payload.functionLocation) {
-      return true;
-    }
-
-    const {
-      payload: {
-        callFrameId,
-        scopeChain
-      },
-      script: {
-        scriptId
-      }
-    } = topCallFrame;
-
-    const {
-      lineNumber: currentLineNumber,
-      columnNumber: currentColumnNumber
-    } = topCallFrame.location();
-
-    const defaultCondition = await this.makeDefaultCondition({
-      debuggerModel: currentDebuggerModel,
-      callFrameId,
-    });
-
-    const {
-      lineNumber: lineNumberOfFunction,
-      columnNumber: columnNumberOfFunction,
-    } = topCallFrame.payload.functionLocation;
-
-    const {locations: possibleBreakpointsInCallFrame} = await currentDebuggerModel.agent.invoke_getPossibleBreakpoints({
-      start: {
-        scriptId,
-        lineNumber: lineNumberOfFunction,
-        columnNumber: columnNumberOfFunction,
-      },
-      restrictToFunction: true
-    });
-
-    const orderFromCallFrame = this.getOrderFromCurrnetScope({
-      currentLineNumber,
-      currentColumnNumber,
-      breakPointsInCurrentScope: possibleBreakpointsInCallFrame,
-    });
-
-    const {
-      reachableIndexInCallFrame: prevReachableIndexInCallFrame,
-      reachableBreackpointInCallFrame: prevReachableBreackpointInCallFrame
-    } = await this.getClosestReachableBreakpoint({
-      startingPoint: orderFromCallFrame,
-      possibleBreakpointsInCallFrame,
-      callFrameId,
-      callFrameFunctionName: topCallFrame.functionName,
-      debuggerModel: currentDebuggerModel,
-      lineNumberOfFunctionLocation: lineNumberOfFunction,
-      callFrames: details.callFrames,
-    });
-
-    const prevBreakpointInCallFrame = prevReachableBreackpointInCallFrame;
-
-    const {
-      reachableBreackpointInCallFrame: beforePrevReachableBreackpointInCallFrame
-    } = await this.getClosestReachableBreakpoint({
-      startingPoint: prevReachableIndexInCallFrame,
-      possibleBreakpointsInCallFrame,
-      callFrameId,
-      callFrameFunctionName: topCallFrame.functionName,
-      debuggerModel: currentDebuggerModel,
-      lineNumberOfFunctionLocation: lineNumberOfFunction,
-      callFrames: details.callFrames,
-    });
-
-    const beforePrevBreakpointInCallFrame = beforePrevReachableBreackpointInCallFrame;
-
-    if (orderFromCallFrame === 0) {
-      return true;
-    }
-
-    const currentBlockScope = scopeChain[0].type === 'block' ? scopeChain[0] : null;
-    const parentBlockScope = scopeChain[1].type === 'block' ? scopeChain[1] : null;
-
-    const defaultBreakpointRequest1: Protocol.Debugger.SetBreakpointRequest = {
-      location: {
-        scriptId,
-        ...prevBreakpointInCallFrame
-      },
-      condition: defaultCondition,
-    };
-    const defaultBreakpointRequest2: Protocol.Debugger.SetBreakpointRequest = {
-      location: {
-        scriptId,
-        ...beforePrevBreakpointInCallFrame
-      },
-      condition: defaultCondition,
-    };
-
-    let orderFromCurrnetBlockScope: number|null = null;
-
-    if (currentBlockScope) {
-      const {
-        startLocation: currentBlockScopeStart,
-        endLocation: currentBlockScopeEnd,
-        object: {
-          objectId: currentBlockScopeObjectId
-        }
-      } = currentBlockScope;
-
-      if (currentBlockScopeStart && currentBlockScopeEnd && currentBlockScopeObjectId) {
-        const breakPointsInCurrentBlockScope = await this.getBreakPointsInBlockScope({
-          currentDebuggerModel,
-          blockScopeStart: currentBlockScopeStart,
-          blockScopeEnd: currentBlockScopeEnd
-        });
-        const order = this.getOrderFromCurrnetScope({
-          currentLineNumber,
-          currentColumnNumber,
-          breakPointsInCurrentScope: breakPointsInCurrentBlockScope
-        });
-
-        orderFromCurrnetBlockScope = order >= 0 ? order : null;
-
-        const checkedIsInForLoopHead = await this.checkInForLoopHead({
-          topCallFrame,
-          debuggerModel: currentDebuggerModel,
-          currentLineNumber,
-          currentColumnNumber,
-          breakPointsInCurrentBlockScope
-        });
-
-        if (checkedIsInForLoopHead.result) {
-          if (checkedIsInForLoopHead.currentPartIndex === 2) {
-            const response = await runtimeModel.agent.invoke_getProperties({
-              objectId: currentBlockScopeObjectId,
-              ownProperties: true
-            });
-
-            if (response.result[0].value && response.result[0].value.type === 'number') {
-              const key = response.result[0].name;
-              const value = response.result[0].value.value;
-              const afterthoughtCondition = `${key} === ${value}`;
-
-              const afterthoughtInForLoopHeadBreakpointRequest1 = {
-                location: {
-                  scriptId,
-                  lineNumber: breakPointsInCurrentBlockScope[breakPointsInCurrentBlockScope.length - 1].lineNumber,
-                  columnNumber: breakPointsInCurrentBlockScope[breakPointsInCurrentBlockScope.length - 1].columnNumber,
-                },
-                condition: `${defaultCondition} && ${afterthoughtCondition}`
-              };
-              const afterthoughtInForLoopHeadBreakpointRequest2 = {
-                location: {
-                  scriptId,
-                  lineNumber: breakPointsInCurrentBlockScope[breakPointsInCurrentBlockScope.length - 2].lineNumber,
-                  columnNumber: breakPointsInCurrentBlockScope[breakPointsInCurrentBlockScope.length - 2].columnNumber,
-                },
-                condition: `${defaultCondition} && ${afterthoughtCondition}`
-              };
-              const breakpointRespones = await this.setSeparatedBreakpoints({
-                breakpointRequest1: afterthoughtInForLoopHeadBreakpointRequest1,
-                breakpointRequest2: afterthoughtInForLoopHeadBreakpointRequest2,
-                debuggerModel: currentDebuggerModel,
-              });
-
-              await this.continueToPausedOnPrevBreakpointAndRemove({
-                debuggerModel: currentDebuggerModel,
-                callFrameId,
-                breakpoint1Response: breakpointRespones.breakpointResponse1,
-                breakpoint2Response: breakpointRespones.breakpointResponse2,
-              });
-
-              return true;
-            }
-          } else if (checkedIsInForLoopHead.currentPartIndex === 1) {
-            const triggeredCounter = await this.getTriggeredCounter({
-              currentBlockScopeObjectId,
-              runtimeModel
-            });
-
-            const initialCounter = await this.findInitialCounter({
-              scriptId,
-              checkedIsInForLoopHead,
-              defaultCondition,
-              currentDebuggerModel,
-              callFrameId
-            });
-            if (!initialCounter) {
-              return true;
-            }
-
-            if (triggeredCounter.value !== initialCounter.value) {
-              const targetCounter = await this.findTargetCounter({
-                scriptId,
-                conditionPartLineNumber: checkedIsInForLoopHead.parts[1].lineNumber,
-                conditionPartColumnNumber: checkedIsInForLoopHead.parts[1].columnNumber as number,
-                initialCounter,
-                triggeredCounter,
-                currentDebuggerModel,
-                callFrameId,
-              });
-
-              const breakpointRequest1 = {
-                location: checkedIsInForLoopHead.parts[2],
-                condition: `${defaultCondition} && ${targetCounter.name} === ${targetCounter.value}`
-              };
-              const breakpointRequest2 = {
-                location: checkedIsInForLoopHead.parts[1],
-                condition: `${defaultCondition} && ${targetCounter.name} === ${targetCounter.value}`
-              };
-
-              const breakpointRespones = await this.setSeparatedBreakpoints({
-                breakpointRequest1,
-                breakpointRequest2,
-                debuggerModel: currentDebuggerModel,
-              });
-
-              await this.continueToPausedOnPrevBreakpointAndRemove({
-                debuggerModel: currentDebuggerModel,
-                callFrameId,
-                breakpoint1Response: breakpointRespones.breakpointResponse1,
-                breakpoint2Response: breakpointRespones.breakpointResponse2,
-              });
-
-              return true;
-            }
-
-            await currentDebuggerModel.agent.invoke_restartFrame({
-              callFrameId,
-              mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-            });
-
-            await currentDebuggerModel.agent.invoke_continueToLocation({
-              location: checkedIsInForLoopHead.parts[0]
-            });
-
-            return true;
-          }
-        }
-      }
-    }
-
-    if (
-      currentBlockScope &&
-      parentBlockScope &&
-      orderFromCurrnetBlockScope !== null &&
-      (orderFromCurrnetBlockScope === 1 || orderFromCurrnetBlockScope === 0)
-    ) {
-      const {
-        startLocation: parentBlockScopeStart,
-        endLocation: parentBlockScopeEnd,
-      } = parentBlockScope;
-      const {
-        startLocation: currentBlockScopeStart,
-        endLocation: currentBlockScopeEnd,
-      } = currentBlockScope;
-      let breakPointsInHeadRange: Protocol.Debugger.BreakLocation[] = [];
-
-      if (
-        parentBlockScopeStart &&
-        parentBlockScopeEnd &&
-        currentBlockScopeStart &&
-        currentBlockScopeEnd
-      ) {
-        const headRange = {
-          startLocation: {
-            scriptId,
-            lineNumber: parentBlockScopeStart.lineNumber,
-            columnNumber: parentBlockScopeStart.columnNumber,
-          },
-          endLocation: {
-            scriptId,
-            lineNumber: currentBlockScopeStart.lineNumber,
-            columnNumber: currentBlockScopeStart.columnNumber
-          }
-        };
-        breakPointsInHeadRange = await this.getBreakPointsInBlockScope({
-          currentDebuggerModel,
-          blockScopeStart: headRange.startLocation,
-          blockScopeEnd: headRange.endLocation
-        });
-      }
-
-      const initializationPart = breakPointsInHeadRange[0];
-      const conditionPart = breakPointsInHeadRange[1];
-
-      const {object: {
-        objectId : parentScopeObjectId
-      }} = parentBlockScope;
-
-      if (parentScopeObjectId) {
-        const response = await runtimeModel.agent.invoke_getProperties({
-          objectId: parentScopeObjectId,
-          ownProperties: true
-        });
-        if (response.result[0].value && response.result[0].value.type === 'number') {
-          const key = response.result[0].name;
-          const value = response.result[0].value.value;
-          const condition = `${key} === ${value}`;
-
-          if (orderFromCurrnetBlockScope === 1) {
-            const secondInForLoopBodyBreakpointRequest1 = {
-              location: {
-                scriptId,
-                ...prevBreakpointInCallFrame
-              },
-              condition: `${defaultBreakpointRequest1.condition} && ${condition}`
-            };
-            const secondInForLoopBodyBreakpointRequest2 = {
-              location: {...conditionPart},
-              condition: `${defaultBreakpointRequest2.condition} && ${condition}`
-            };
-            const breakpointResponses = await this.setSeparatedBreakpoints({
-              breakpointRequest1: secondInForLoopBodyBreakpointRequest1,
-              breakpointRequest2: secondInForLoopBodyBreakpointRequest2,
-              debuggerModel: currentDebuggerModel,
-            });
-
-            await this.continueToPausedOnPrevBreakpointAndRemove({
-              debuggerModel: currentDebuggerModel,
-              callFrameId,
-              breakpoint1Response: breakpointResponses.breakpointResponse1,
-              breakpoint2Response: breakpointResponses.breakpointResponse2
-            });
-
-            return true;
-          }
-
-          if (orderFromCurrnetBlockScope === 0) {
-            const firstInForLoopBodyBreakpointRequest1 = {
-              location: {...conditionPart},
-              condition: `${defaultBreakpointRequest1.condition} && ${condition}`
-            };
-            const firstInForLoopBodyBreakpointRequest2 = {
-              location: {...initializationPart},
-              condition: `${defaultBreakpointRequest2.condition}`
-            };
-            const breakpointResponses = await this.setSeparatedBreakpoints({
-              breakpointRequest1: firstInForLoopBodyBreakpointRequest1,
-              breakpointRequest2: firstInForLoopBodyBreakpointRequest2,
-              debuggerModel: currentDebuggerModel,
-            });
-
-            await this.continueToPausedOnPrevBreakpointAndRemove({
-              debuggerModel: currentDebuggerModel,
-              callFrameId,
-              breakpoint1Response: breakpointResponses.breakpointResponse1,
-              breakpoint2Response: breakpointResponses.breakpointResponse2
-            });
-
-            return true;
-          }
-        }
-      }
-    }
-
-    if (
-      parentBlockScope &&
-      orderFromCurrnetBlockScope !== null &&
-      orderFromCurrnetBlockScope > 1
-    ) {
-      const {object: {
-        objectId: parentScopeObjectId
-      }} = parentBlockScope;
-
-      if (parentScopeObjectId) {
-        const response = await runtimeModel.agent.invoke_getProperties({
-          objectId: parentScopeObjectId,
-          ownProperties: true
-        });
-        if (response.result[0].value && response.result[0].value.type === 'number') {
-          const key = response.result[0].name;
-          const value = response.result[0].value.value;
-          const condition = `${key} === ${value}`;
-
-          const thirdAndMoreInForLoopBodyBreakpointRequest1 = {
-            location: {
-              scriptId,
-              ...prevBreakpointInCallFrame
-            },
-            condition: `${defaultBreakpointRequest1.condition} && ${condition}`
-          };
-
-          const thirdAndMoreInForLoopBodyBreakpointRequest2 = {
-            location: {
-              scriptId,
-              ...beforePrevBreakpointInCallFrame
-            },
-            condition: `${defaultBreakpointRequest2.condition} && ${condition}`
-          };
-
-          const breakpointResponses = await this.setSeparatedBreakpoints({
-            breakpointRequest1: thirdAndMoreInForLoopBodyBreakpointRequest1,
-            breakpointRequest2: thirdAndMoreInForLoopBodyBreakpointRequest2,
-            debuggerModel: currentDebuggerModel,
-          });
-
-          await this.continueToPausedOnPrevBreakpointAndRemove({
-            debuggerModel: currentDebuggerModel,
-            callFrameId,
-            breakpoint1Response: breakpointResponses.breakpointResponse1,
-            breakpoint2Response: breakpointResponses.breakpointResponse2
-          });
-
-          return true;
-        }
-      }
-    }
-
-    if (orderFromCallFrame > 2) {
-      const enteredResponse = await this.checkEnteredIntoLoop({
-        currentDebuggerModel,
-        defaultBreakpointRequest1,
-        defaultBreakpointRequest2,
-        defaultCondition,
-        topCallFrame,
-        callFrameId,
-      });
-
-      if (
-        enteredResponse.result &&
-        this.calculateIsInLoopBoundary({
-          target: {
-            lineNumber: defaultBreakpointRequest1.location.lineNumber,
-            columnNumber: defaultBreakpointRequest1.location.columnNumber || 0,
-          },
-          loopBoundary: enteredResponse.fullLoopBoundary
-        })
-      ) {
-        const lastCounter = await this.findLastCounterAfterLoopEnd({
-          currentDebuggerModel,
-          defaultBreakpointRequest2,
-          defaultCondition,
-          topCallFrame,
-          callFrameId,
-        });
-
-        if (!lastCounter) {
-          return true;
-        }
-
-        const lastCounterCondition = `${lastCounter.name} === ${lastCounter.value}`;
-        const breakpointResponseLast = await currentDebuggerModel.agent.invoke_setBreakpoint({
-          location: {
-            scriptId: lastCounter.conditionPart.scriptId,
-            lineNumber: lastCounter.conditionPart.lineNumber,
-            columnNumber: lastCounter.conditionPart.columnNumber
-          },
-          condition: `${defaultCondition} && ${lastCounterCondition}`
-        });
-
-        await currentDebuggerModel.agent.invoke_restartFrame({
-          callFrameId,
-          mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-        });
-
-        await currentDebuggerModel.agent.invoke_resume({terminateOnResume: false});
-
-        await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: breakpointResponseLast.breakpointId});
-        await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: lastCounter.savePointResponse.breakpointId});
-
-        return true;
-      }
-
-      if (
-        enteredResponse.result &&
-        !this.calculateIsInLoopBoundary({
-          target: {
-            lineNumber: defaultBreakpointRequest1.location.lineNumber,
-            columnNumber: defaultBreakpointRequest1.location.columnNumber || 0,
-          },
-          loopBoundary: enteredResponse.fullLoopBoundary
-        })
-      ) {
-        const breakpointResponse = await currentDebuggerModel.agent.invoke_setBreakpoint(defaultBreakpointRequest1);
-
-        await currentDebuggerModel.agent.invoke_restartFrame({
-          callFrameId,
-          mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-        });
-
-        await currentDebuggerModel.agent.invoke_resume({terminateOnResume: false});
-
-        await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: breakpointResponse.breakpointId});
-
-        return true;
-      }
-    }
-
-    const defaultBreakpointResponses = await this.setSeparatedBreakpoints({
-      breakpointRequest1: defaultBreakpointRequest1,
-      breakpointRequest2: defaultBreakpointRequest2,
-      debuggerModel: currentDebuggerModel,
-    });
-
-    const isInSecondBreakpointFromCallFrame = orderFromCallFrame === 1;
-    if (isInSecondBreakpointFromCallFrame) {
-      await currentDebuggerModel.agent.invoke_restartFrame({
-        callFrameId,
-        mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-      });
-
-      void currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: defaultBreakpointResponses.breakpointResponse1.breakpointId});
-
-      return true;
-    }
-
-    await this.continueToPausedOnPrevBreakpointAndRemove({
-      debuggerModel: currentDebuggerModel,
-      callFrameId,
-      breakpoint1Response: defaultBreakpointResponses.breakpointResponse1,
-      breakpoint2Response: defaultBreakpointResponses.breakpointResponse2,
-    });
-
-    return true;
-  }
-
-  getPausedLineAndColumnAfterRestart(): {
-    lineNumber: number,
-    columnNumber: number,
-  }|null {
+  private async goToPrevLine(): Promise<void> {
+    const replay = Replay.ReplayController.ReplayController.instance();
     const target = UI.Context.Context.instance().flavor(SDK.Target.Target);
-
-    if (!target) {
-      return null;
+    if (this.#reverseTransition || !replay.canReverse(target?.model(SDK.DebuggerModel.DebuggerModel) ?? null)) {
+      return;
     }
-
-    const debuggerModel = target.model(SDK.DebuggerModel.DebuggerModel);
-
-    if (debuggerModel) {
-      const details = debuggerModel ? debuggerModel.debuggerPausedDetails() : null;
-
-      return (details) ? {
-        lineNumber: details.callFrames[0].location().lineNumber,
-        columnNumber: details.callFrames[0].location().columnNumber
-      } : null;
-    }
-
-    return null;
-  }
-
-  getOrderFromCurrnetScope({
-    currentLineNumber,
-    currentColumnNumber,
-    breakPointsInCurrentScope,
-  }: {
-    currentLineNumber: number,
-    currentColumnNumber: number,
-    breakPointsInCurrentScope: Protocol.Debugger.BreakLocation[],
-  }): number {
-    const orderFromCurrnetScope = breakPointsInCurrentScope.findIndex(breakPoint => {
-      const isInScope = (
-        breakPoint.lineNumber === currentLineNumber &&
-        breakPoint.columnNumber === currentColumnNumber
-      );
-      return isInScope;
-    });
-
-    return orderFromCurrnetScope;
-  }
-
-  async getBreakPointsInBlockScope({
-    currentDebuggerModel,
-    blockScopeStart,
-    blockScopeEnd
-  }: {
-    currentDebuggerModel: SDK.DebuggerModel.DebuggerModel,
-    blockScopeStart: Protocol.Debugger.Location,
-    blockScopeEnd: Protocol.Debugger.Location,
-  }): Promise<Protocol.Debugger.BreakLocation[]> {
-    const {locations: breakPointsInCurrentBlockScope} = await currentDebuggerModel.agent.invoke_getPossibleBreakpoints({
-      start: {
-        scriptId: blockScopeStart.scriptId,
-        lineNumber: blockScopeStart.lineNumber,
-        columnNumber: blockScopeStart.columnNumber,
-      },
-      end: {
-        scriptId: blockScopeEnd.scriptId,
-        lineNumber: blockScopeEnd.lineNumber,
-        columnNumber: blockScopeEnd.columnNumber,
-      },
-      restrictToFunction: true
-    });
-    return breakPointsInCurrentBlockScope;
-  }
-
-  async getFuncSourceString({
-    callFrames,
-    runtimeModel,
-    runningFunctionName,
-  }: {
-    callFrames: SDK.DebuggerModel.CallFrame[],
-    runtimeModel: SDK.RuntimeModel.RuntimeModel,
-    runningFunctionName: string,
-  }): Promise<string|null> {
-    const upperCallFrame = callFrames[1];
-    if (!upperCallFrame) {
-      return null;
-    }
-
-    const upperScopeObjectId = upperCallFrame.payload.scopeChain[0].object.objectId;
-    if (!upperScopeObjectId) {
-      return null;
-    }
-
-    const upperPropertiesResponse = await runtimeModel.agent.invoke_getProperties({
-      objectId: upperScopeObjectId,
-    });
-    const runningFunctionData = upperPropertiesResponse.result.find(property => property.name === runningFunctionName);
-    if (!runningFunctionData) {
-      return null;
-    }
-
-    if (!runningFunctionData.value) {
-      return null;
-    }
-    if (!runningFunctionData.value.description) {
-      return null;
-    }
-
-    return runningFunctionData.value.description;
-  }
-
-  async getClosestReachableBreakpoint({
-    startingPoint,
-    possibleBreakpointsInCallFrame,
-    callFrameId,
-    callFrameFunctionName,
-    debuggerModel,
-    lineNumberOfFunctionLocation,
-    callFrames
-  }: {
-    startingPoint: number,
-    possibleBreakpointsInCallFrame: Protocol.Debugger.BreakLocation[],
-    callFrameId: Protocol.Debugger.CallFrameId,
-    callFrameFunctionName: string,
-    debuggerModel: SDK.DebuggerModel.DebuggerModel,
-    lineNumberOfFunctionLocation: number,
-    callFrames: SDK.DebuggerModel.CallFrame[],
-  }): Promise<{
-    reachableIndexInCallFrame: number,
-    reachableBreackpointInCallFrame: {lineNumber: number, columnNumber: number},
-  }> {
-    let reachable = false;
-    let reachableIndexInCallFrame = startingPoint - 1;
-    let reachableBreackpointInCallFrame = {
-      lineNumber: possibleBreakpointsInCallFrame[0].lineNumber,
-      columnNumber: possibleBreakpointsInCallFrame[0].columnNumber || 0
-    };
-
-    while (!reachable && reachableIndexInCallFrame >= 0) {
-      reachableBreackpointInCallFrame = {
-        lineNumber: possibleBreakpointsInCallFrame[reachableIndexInCallFrame].lineNumber,
-        columnNumber: possibleBreakpointsInCallFrame[reachableIndexInCallFrame].columnNumber || 0
-      };
-
-      let funcSource = await this.getFuncSourceString({
-        callFrames,
-        runtimeModel: debuggerModel.runtimeModel(),
-        runningFunctionName: callFrameFunctionName
+    const editor = this.sourcesViewInternal.currentSourceFrame()?.textEditor.editor;
+    const scroll = editor ? {top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft} : null;
+    this.#reverseTransition = true;
+    void this.updateDebuggerButtonsAndStatus();
+    try {
+      await withReplayTransition(async () => {
+        await replay.reverse();
+        await this.callFrameChanged();
+        await this.waitForReplayHighlight(scroll);
       });
+    } catch (error) {
+      Common.Console.Console.instance().error(`BackDo: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.#reverseTransition = false;
+      void this.updateDebuggerButtonsAndStatus();
+    }
+  }
 
-      if (!funcSource) {
-        const funcSourceDefinedInScriptResponse = await debuggerModel.agent.invoke_evaluateOnCallFrame({
-          callFrameId,
-          expression: `${callFrameFunctionName}.toString()`,
-          returnByValue: true,
-        });
-        funcSource = funcSourceDefinedInScriptResponse.result.value;
-
-        if (!funcSource) {
-          break;
+  private async waitForReplayHighlight(scroll: {top: number, left: number}|null): Promise<void> {
+    const deadline = performance.now() + 2000;
+    while (performance.now() < deadline) {
+      const callFrame = UI.Context.Context.instance().flavor(SDK.DebuggerModel.CallFrame);
+      const location = callFrame &&
+          await Bindings.DebuggerWorkspaceBinding.DebuggerWorkspaceBinding.instance().rawLocationToUILocation(
+              callFrame.location());
+      if (!location) {
+        await new Promise(resolve => setTimeout(resolve, 16));
+        continue;
+      }
+      const frame = this.sourcesViewInternal.currentSourceFrame();
+      const token = frame?.textEditor.shadowRoot?.querySelector('.cm-executionToken');
+      if (frame && token && this.sourcesViewInternal.currentUISourceCode() === location.uiSourceCode) {
+        const editor = frame.textEditor.editor;
+        const offset = editor.posAtDOM(token, 0);
+        const line = editor.state.doc.lineAt(offset);
+        if (line.number - 1 === location.lineNumber && offset - line.from === (location.columnNumber ?? 0)) {
+          if (scroll) {
+            const lineTop = editor.lineBlockAt(offset).top;
+            if (lineTop >= scroll.top && lineTop < scroll.top + editor.scrollDOM.clientHeight) {
+              editor.scrollDOM.scrollTop = scroll.top;
+              editor.scrollDOM.scrollLeft = scroll.left;
+            }
+          }
+          // Let the final scope/value decorations settle without depending on animation frames,
+          // which View Transitions can suspend while the update callback is pending.
+          await new Promise(resolve => setTimeout(resolve, 80));
+          return;
         }
       }
-
-      const funcLineList = funcSource.split(/[\n]/g);
-      const injectedFuncLineList = funcLineList.map((lineSource, index) => {
-        if (index === (reachableBreackpointInCallFrame.lineNumber - lineNumberOfFunctionLocation)) {
-          return 'return {result: true};' + lineSource;
-        }
-        return lineSource;
-      });
-
-      const convertedToIIFE = `(${injectedFuncLineList.join('')})(...arguments)`;
-      const reachableResponse = await debuggerModel.agent.invoke_evaluateOnCallFrame({
-        callFrameId,
-        expression: convertedToIIFE,
-        returnByValue: true,
-      });
-      reachable = reachableResponse.result.value?.result === true;
-      if (!reachable) {
-        reachableIndexInCallFrame -= 1;
-      }
+      await new Promise(resolve => setTimeout(resolve, 16));
     }
-
-    return {
-      reachableIndexInCallFrame,
-      reachableBreackpointInCallFrame
-    };
-  }
-
-  async continueToPausedOnPrevBreakpointAndRemove({
-    debuggerModel,
-    callFrameId,
-    breakpoint1Response,
-    breakpoint2Response
-  }: {
-    debuggerModel: SDK.DebuggerModel.DebuggerModel,
-    callFrameId: Protocol.Debugger.CallFrameId,
-    breakpoint1Response: Protocol.Debugger.SetBreakpointResponse,
-    breakpoint2Response: Protocol.Debugger.SetBreakpointResponse,
-  }): Promise<void> {
-    await debuggerModel.agent.invoke_restartFrame({
-      callFrameId,
-      mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-    });
-
-    await debuggerModel.agent.invoke_resume({terminateOnResume: false});
-
-    for (
-      let pausedLineAndColumn = this.getPausedLineAndColumnAfterRestart();
-      pausedLineAndColumn !== null &&
-      ((pausedLineAndColumn.lineNumber < breakpoint2Response.actualLocation.lineNumber) || ( pausedLineAndColumn.lineNumber === breakpoint2Response.actualLocation.lineNumber && pausedLineAndColumn.columnNumber < (breakpoint2Response.actualLocation.columnNumber || 0)));
-      pausedLineAndColumn = this.getPausedLineAndColumnAfterRestart()
-    ) {
-      await debuggerModel.agent.invoke_resume({terminateOnResume: false});
-    }
-
-    await debuggerModel.agent.invoke_removeBreakpoint({breakpointId: breakpoint1Response.breakpointId});
-    await debuggerModel.agent.invoke_removeBreakpoint({breakpointId: breakpoint2Response.breakpointId});
-  }
-
-  async makeDefaultCondition({
-    debuggerModel,
-    callFrameId,
-  }: {
-    debuggerModel: SDK.DebuggerModel.DebuggerModel,
-    callFrameId: Protocol.Debugger.CallFrameId,
-  }): Promise<string> {
-    const response = await debuggerModel.agent.invoke_evaluateOnCallFrame({
-      callFrameId,
-      expression: String.raw`JSON.stringify([...arguments].map((arg) => typeof arg === 'function' ? arg.name : arg))`,
-      returnByValue: true,
-    });
-    const argumentsJSON: string = response.result.value;
-
-    return String.raw`JSON.stringify([...arguments].map((arg) => typeof arg === 'function' ? arg.name : arg)) === '${argumentsJSON}'`;
-  }
-
-  async checkInForLoopHead({
-    topCallFrame,
-    debuggerModel,
-    currentLineNumber,
-    currentColumnNumber,
-    breakPointsInCurrentBlockScope,
-  }: {
-    topCallFrame: SDK.DebuggerModel.CallFrame,
-    debuggerModel: SDK.DebuggerModel.DebuggerModel,
-    currentLineNumber: number,
-    currentColumnNumber: number,
-    breakPointsInCurrentBlockScope: Protocol.Debugger.BreakLocation[],
-  }): Promise<{result: false}|{result: true, parts: Protocol.Debugger.BreakLocation[], currentPartIndex: number}> {
-    const topScope = topCallFrame.payload.scopeChain[0];
-    const isInBlockScope = topScope.type === 'block';
-
-    if (!isInBlockScope) {
-      return {result: false};
-    }
-
-    const parts: Protocol.Debugger.BreakLocation[] = [];
-
-    for (let i = 0; i < 3; i += 1) {
-      if (breakPointsInCurrentBlockScope[i]) {
-        parts.push(breakPointsInCurrentBlockScope[i]);
-      }
-    }
-
-    if (parts.length !== 3) {
-      return {result: false};
-    }
-
-    const isInOneLine = parts.every(part => part.lineNumber === currentLineNumber);
-
-    if (!isInOneLine) {
-      return {result: false};
-    }
-
-    const forInContentResponse = await debuggerModel.agent.invoke_searchInContent({
-      scriptId: parts[0].scriptId,
-      query: '\\b(for)\\b',
-      caseSensitive: true,
-      isRegex: true
-    });
-    const forKeywordMatch = forInContentResponse.result
-      .find(searchMatch => searchMatch.lineNumber === parts[0].lineNumber);
-
-    if (!forKeywordMatch) {
-      return {result: false};
-    }
-
-    const currentPartIndex = parts.findIndex(part => part.lineNumber === currentLineNumber && part.columnNumber === currentColumnNumber);
-
-    if (currentPartIndex === -1) {
-      return {result: false};
-    }
-
-    return {
-      result: true,
-      currentPartIndex,
-      parts
-    };
-  }
-
-  async setSeparatedBreakpoints({
-    breakpointRequest1,
-    breakpointRequest2,
-    debuggerModel,
-  }: {
-    breakpointRequest1: Protocol.Debugger.SetBreakpointRequest,
-    breakpointRequest2: Protocol.Debugger.SetBreakpointRequest,
-    debuggerModel: SDK.DebuggerModel.DebuggerModel,
-  }): Promise<{
-    breakpointResponse1: Protocol.Debugger.SetBreakpointResponse,
-    breakpointResponse2: Protocol.Debugger.SetBreakpointResponse,
-  }> {
-    const breakpointResponse1 = await debuggerModel.agent.invoke_setBreakpoint(breakpointRequest1);
-    const breakpointResponse2 = await debuggerModel.agent.invoke_setBreakpoint(breakpointRequest2);
-
-    return {
-      breakpointResponse1,
-      breakpointResponse2
-    };
-  }
-
-  checkPaused(): {result: false} | {result: true, details: SDK.DebuggerModel.DebuggerPausedDetails, debuggerModel: SDK.DebuggerModel.DebuggerModel} {
-    const currentTarget = UI.Context.Context.instance().flavor(SDK.Target.Target);
-    const currentDebuggerModel = currentTarget ? currentTarget.model(SDK.DebuggerModel.DebuggerModel) : null;
-    const details = currentDebuggerModel ? currentDebuggerModel.debuggerPausedDetails() : null;
-
-    if (details && currentDebuggerModel) {
-      return {result: true, details, debuggerModel: currentDebuggerModel};
-    }
-    return {result: false};
-  }
-
-  async findInitialCounter({
-    scriptId,
-    checkedIsInForLoopHead,
-    defaultCondition,
-    currentDebuggerModel,
-    callFrameId
-  }: {
-    scriptId: Protocol.Runtime.ScriptId,
-    checkedIsInForLoopHead: {result: true, parts: Protocol.Debugger.BreakLocation[], currentPartIndex: number},
-    defaultCondition: string,
-    currentDebuggerModel: SDK.DebuggerModel.DebuggerModel,
-    callFrameId: Protocol.Debugger.CallFrameId,
-  }): Promise<{name: string, value: number}|null> {
-    const BreakpointRequest1 = {
-      location: {
-        scriptId,
-        lineNumber: checkedIsInForLoopHead.parts[1].lineNumber,
-        columnNumber: checkedIsInForLoopHead.parts[1].columnNumber,
-      },
-      condition: defaultCondition
-    };
-    const BreakpointRequest2 = {
-      location: {
-        scriptId,
-        lineNumber: checkedIsInForLoopHead.parts[0].lineNumber,
-        columnNumber: checkedIsInForLoopHead.parts[0].columnNumber,
-      },
-      condition: defaultCondition
-    };
-    const breakpointRespones = await this.setSeparatedBreakpoints({
-      breakpointRequest1: BreakpointRequest1,
-      breakpointRequest2: BreakpointRequest2,
-      debuggerModel: currentDebuggerModel,
-    });
-
-    await this.continueToPausedOnPrevBreakpointAndRemove({
-      debuggerModel: currentDebuggerModel,
-      callFrameId,
-      breakpoint1Response: breakpointRespones.breakpointResponse1,
-      breakpoint2Response: breakpointRespones.breakpointResponse2,
-    });
-
-    const checkedIsPaused = this.checkPaused();
-
-    if (!checkedIsPaused.result) {
-      return null;
-    }
-    const initialObjectId = checkedIsPaused.details.callFrames[0].payload.scopeChain[0].object.objectId;
-    if (!initialObjectId) {
-      return null;
-    }
-    const initialResponse = await checkedIsPaused.debuggerModel.runtimeModel().agent.invoke_getProperties({
-      objectId: initialObjectId,
-      ownProperties: true,
-    });
-    const initialCounter = {
-      name: initialResponse.result[0].name,
-      value: initialResponse.result[0].value?.value as number,
-    };
-    return initialCounter;
-  }
-
-  async getTriggeredCounter({
-    currentBlockScopeObjectId,
-    runtimeModel
-  }: {
-    currentBlockScopeObjectId: Protocol.Runtime.RemoteObjectId,
-    runtimeModel: SDK.RuntimeModel.RuntimeModel,
-  }): Promise<{name: string, value: number}> {
-    const triggeredResponse = await runtimeModel.agent.invoke_getProperties({
-      objectId: currentBlockScopeObjectId,
-      ownProperties: true
-    });
-
-    const triggeredCounter = {
-      name: triggeredResponse.result[0].name,
-      value: triggeredResponse.result[0].value?.value as number,
-    };
-
-    return triggeredCounter;
-  }
-
-  async findTargetCounter({
-    scriptId,
-    conditionPartLineNumber,
-    conditionPartColumnNumber,
-    initialCounter,
-    triggeredCounter,
-    currentDebuggerModel,
-    callFrameId,
-  }: {
-    scriptId: Protocol.Runtime.ScriptId,
-    conditionPartLineNumber: number,
-    conditionPartColumnNumber: number,
-    initialCounter: {name: string, value: number},
-    triggeredCounter: {name: string, value: number},
-    currentDebuggerModel: SDK.DebuggerModel.DebuggerModel,
-    callFrameId: Protocol.Debugger.CallFrameId,
-  }): Promise<{name: string, value: number}> {
-    const location = {
-      scriptId,
-      lineNumber: conditionPartLineNumber,
-      columnNumber: conditionPartColumnNumber,
-    };
-
-    const updatedCounters = [initialCounter.value];
-
-    while (updatedCounters[updatedCounters.length - 1] !== triggeredCounter.value) {
-      await currentDebuggerModel.agent.invoke_continueToLocation({location});
-
-      const response = await currentDebuggerModel.agent.invoke_evaluateOnCallFrame({
-        callFrameId,
-        expression: triggeredCounter.name,
-        returnByValue: true,
-      });
-
-      const updated = response.result.value;
-      updatedCounters.push(updated);
-    }
-    const targetCounter = updatedCounters[updatedCounters.length - 2];
-
-    return {
-      name: triggeredCounter.name,
-      value: targetCounter,
-    };
-  }
-
-  async checkEnteredIntoLoop({
-    currentDebuggerModel,
-    defaultBreakpointRequest1,
-    defaultBreakpointRequest2,
-    defaultCondition,
-    topCallFrame,
-    callFrameId,
-  }: {
-    currentDebuggerModel: SDK.DebuggerModel.DebuggerModel,
-    defaultBreakpointRequest1: Protocol.Debugger.SetBreakpointRequest,
-    defaultBreakpointRequest2: Protocol.Debugger.SetBreakpointRequest,
-    defaultCondition: string,
-    topCallFrame: SDK.DebuggerModel.CallFrame,
-    callFrameId: Protocol.Debugger.CallFrameId,
-  }): Promise<EnteredResponse|FailedResultResponse> {
-    const savePointPrev = await currentDebuggerModel.agent.invoke_setBreakpoint({
-      location: defaultBreakpointRequest1.location,
-      condition: defaultCondition
-    });
-    const savePoint = await currentDebuggerModel.agent.invoke_setBreakpoint({
-      location: topCallFrame.payload.location,
-      condition: defaultCondition
-    });
-
-    async function clear(): Promise<void> {
-      await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: savePointPrev.breakpointId});
-      await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: savePoint.breakpointId});
-
-      await currentDebuggerModel.agent.invoke_restartFrame({
-        callFrameId,
-        mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-      });
-    }
-
-    await currentDebuggerModel.agent.invoke_restartFrame({
-      callFrameId,
-      mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-    });
-
-    await currentDebuggerModel.agent.invoke_continueToLocation({
-      location: defaultBreakpointRequest2.location
-    });
-    const checkedTry1 = this.checkPaused();
-    if (!checkedTry1.result) {
-      await clear();
-
-      return {result: false};
-    }
-
-    await currentDebuggerModel.agent.invoke_continueToLocation({
-      location: defaultBreakpointRequest2.location
-    });
-    const checkedTry2 = this.checkPaused();
-    if (!checkedTry2.result) {
-      await clear();
-
-      return {result: false};
-    }
-
-    const current = checkedTry2.details.callFrames[0].payload.scopeChain[0];
-    const parent = checkedTry2.details.callFrames[0].payload.scopeChain[1];
-
-    if (!parent || !parent.startLocation || !current.startLocation || !parent.endLocation || !current.endLocation) {
-      await clear();
-
-      return {result: false};
-    }
-    if (current.type !== 'block' || parent.type !== 'block') {
-      await clear();
-
-      return {result: false};
-    }
-
-    const isLoop = (
-      current.endLocation.lineNumber === parent.endLocation.lineNumber &&
-      current.endLocation.columnNumber === parent.endLocation.columnNumber &&
-      current.startLocation.lineNumber === parent.startLocation.lineNumber
-    );
-
-    if (!isLoop) {
-      await clear();
-
-      return {result: false};
-    }
-
-    const fullLoopBoundary = {
-      startLocation: parent.startLocation,
-      endLocation: parent.endLocation,
-    };
-
-    await clear();
-
-    return {
-      result: isLoop,
-      fullLoopBoundary,
-    };
-  }
-
-  async findLastCounterAfterLoopEnd({
-    currentDebuggerModel,
-    defaultBreakpointRequest2,
-    defaultCondition,
-    topCallFrame,
-    callFrameId,
-  }: {
-    currentDebuggerModel: SDK.DebuggerModel.DebuggerModel,
-    defaultBreakpointRequest2: Protocol.Debugger.SetBreakpointRequest,
-    defaultCondition: string,
-    topCallFrame: SDK.DebuggerModel.CallFrame,
-    callFrameId: Protocol.Debugger.CallFrameId,
-  }): Promise<null|{
-    value: number,
-    conditionPart: Protocol.Debugger.BreakLocation,
-    name: string,
-    savePointResponse: Protocol.Debugger.SetBreakpointResponse,
-  }> {
-    await currentDebuggerModel.agent.invoke_restartFrame({
-      callFrameId,
-      mode: Protocol.Debugger.RestartFrameRequestMode.StepInto
-    });
-
-    const savePointResponse = await currentDebuggerModel.agent.invoke_setBreakpoint({
-      location: topCallFrame.payload.location,
-      condition: defaultCondition
-    });
-
-    const travelPointResponse = await currentDebuggerModel.agent.invoke_setBreakpoint(defaultBreakpointRequest2);
-
-    await currentDebuggerModel.agent.invoke_resume({terminateOnResume: false});
-    const checkedTry1 = this.checkPaused();
-    if (!checkedTry1.result) {
-      return null;
-    }
-
-    await currentDebuggerModel.agent.invoke_continueToLocation({
-      location: defaultBreakpointRequest2.location
-    });
-    const checkedTry2 = this.checkPaused();
-    if (!checkedTry2.result) {
-      return null;
-    }
-
-    await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: travelPointResponse.breakpointId});
-
-    const current = checkedTry2.details.callFrames[0].payload.scopeChain[0];
-    const parent = checkedTry2.details.callFrames[0].payload.scopeChain[1];
-
-    if (!parent || !parent.startLocation || !current.startLocation) {
-      return null;
-    }
-    if (current.type !== 'block' || parent.type !== 'block') {
-      return null;
-    }
-
-    const headRange = {
-      startLocation: {
-        scriptId: parent.startLocation.scriptId,
-        lineNumber: parent.startLocation.lineNumber,
-        columnNumber: parent.startLocation.columnNumber,
-      },
-      endLocation: {
-        scriptId: current.startLocation.scriptId,
-        lineNumber: current.startLocation.lineNumber,
-        columnNumber: current.startLocation.columnNumber,
-      }
-    };
-    const breakPointsInHeadRange = await this.getBreakPointsInBlockScope({
-      currentDebuggerModel,
-      blockScopeStart: headRange.startLocation,
-      blockScopeEnd: headRange.endLocation
-    });
-    const conditionPart = breakPointsInHeadRange[1];
-
-    const response = await currentDebuggerModel.runtimeModel().agent.invoke_getProperties({
-      objectId: parent.object.objectId as Protocol.Runtime.RemoteObjectId,
-      ownProperties: true
-    });
-    const counterName = response.result[0].name;
-    const updatedCounters = [];
-
-    let isEnd = false;
-    let checked = this.checkPaused();
-    if (!checked.result) {
-      return null;
-    }
-    const conditionPartBreakpointResponse = await currentDebuggerModel.agent.invoke_setBreakpoint({
-      location: conditionPart,
-      condition: defaultCondition
-    });
-
-    while (!isEnd && checked.result) {
-      await currentDebuggerModel.agent.invoke_resume({terminateOnResume: false});
-      const response = await currentDebuggerModel.agent.invoke_evaluateOnCallFrame({
-        callFrameId,
-        expression: counterName,
-        returnByValue: true,
-      });
-
-      checked = this.checkPaused();
-
-      if (
-        checked.result &&
-        checked.details.breakpointIds.includes(savePointResponse.breakpointId)
-      ) {
-        isEnd = true;
-
-        await currentDebuggerModel.agent.invoke_removeBreakpoint({breakpointId: conditionPartBreakpointResponse.breakpointId});
-
-        return {
-          value: updatedCounters[updatedCounters.length - 1],
-          conditionPart,
-          name: counterName,
-          savePointResponse
-        };
-      }
-
-      const updated = response.result.value;
-      updatedCounters.push(updated);
-    }
-
-    return null;
-  }
-
-  calculateIsInLoopBoundary({
-    target,
-    loopBoundary,
-  }: {
-    target: {lineNumber: number, columnNumber: number},
-    loopBoundary: {startLocation: Protocol.Debugger.Location, endLocation: Protocol.Debugger.Location},
-  }): boolean {
-    if (
-      target.lineNumber < loopBoundary.startLocation.lineNumber ||
-      target.lineNumber > loopBoundary.endLocation.lineNumber
-    ) {
-      return false;
-    }
-
-    if (
-      target.lineNumber === loopBoundary.startLocation.lineNumber &&
-      target.columnNumber < Number(loopBoundary.startLocation.columnNumber)
-    ) {
-      return false;
-    }
-
-    if (
-      target.lineNumber === loopBoundary.endLocation.lineNumber &&
-      target.columnNumber > Number(loopBoundary.endLocation.columnNumber)
-    ) {
-      return false;
-    }
-
-    return true;
+    throw new Error('The process was restored, but the editor highlight did not become ready');
   }
 
   private async continueToLocation(uiLocation: Workspace.UISourceCode.UILocation): Promise<void> {
@@ -2146,7 +975,9 @@ export class SourcesPanel extends UI.Panel.Panel implements
     debugToolbar.appendToolbarItem(UI.Toolbar.Toolbar.createActionButton(this.stepOutAction));
     debugToolbar.appendToolbarItem(UI.Toolbar.Toolbar.createActionButton(this.stepAction));
 
-    const goToPrevLineButton = new UI.Toolbar.ToolbarButton('goToPrevLine', 'go-to-prev-line');
+    const goToPrevLineButton = new UI.Toolbar.ToolbarButton('Go to previous recorded position', 'go-to-prev-line');
+    this.#reverseButton = goToPrevLineButton;
+    goToPrevLineButton.setEnabled(false);
 
     goToPrevLineButton.addEventListener(UI.Toolbar.ToolbarButton.Events.CLICK, this.goToPrevLine, this);
 

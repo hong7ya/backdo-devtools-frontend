@@ -10,7 +10,10 @@ import '../../panels/network/network-meta.js';
 import * as Common from '../../core/common/common.js';
 import * as Host from '../../core/host/host.js';
 import * as i18n from '../../core/i18n/i18n.js';
+import type * as Platform from '../../core/platform/platform.js';
+import * as ProtocolClient from '../../core/protocol_client/protocol_client.js';
 import * as SDK from '../../core/sdk/sdk.js';
+import * as Replay from '../../models/replay/replay.js';
 import type * as Sources from '../../panels/sources/sources.js';
 import * as Components from '../../ui/legacy/components/utils/utils.js';
 import * as UI from '../../ui/legacy/legacy.js';
@@ -56,6 +59,35 @@ export class JsMainImpl implements Common.Runnable.Runnable {
 
   async run(): Promise<void> {
     Host.userMetrics.actionTaken(Host.UserMetrics.Action.ConnectToNodeJSDirectly);
+    const token = new URL(location.href).searchParams.get('backdoSession');
+    if (token) {
+      const replay = Replay.ReplayController.ReplayController.instance();
+      const connect = async (ws: string): Promise<void> => {
+        ProtocolClient.InspectorBackend.Connection.setFactory(() => new SDK.Connections.WebSocketConnection(
+            ws as Platform.DevToolsPath.UrlString, message => replay.fail(new Error(message))));
+        const manager = SDK.TargetManager.TargetManager.instance();
+        const target = manager.createTarget('main', i18nString(UIStrings.main), SDK.Target.Type.NODE, null);
+        manager.setScopeTarget(target);
+        UI.Context.Context.instance().setFlavor(SDK.Target.Target, target);
+        replay.attach(target);
+        const response = await target.runtimeAgent().invoke_runIfWaitingForDebugger();
+        if (response.getError()) {
+          throw new Error(response.getError());
+        }
+        const url = new URL(location.href);
+        url.searchParams.delete('wss');
+        url.searchParams.set('ws', ws.replace(/^ws:\/\//, ''));
+        history.replaceState(history.state, '', url);
+      };
+      try {
+        const session = await replay.configure(token, connect);
+        await SDK.Connections.initMainConnection(
+            () => connect(session.ws), Components.TargetDetachedDialog.TargetDetachedDialog.connectionLost);
+      } catch (error) {
+        replay.fail(error);
+      }
+      return;
+    }
     void SDK.Connections.initMainConnection(async () => {
       const target = SDK.TargetManager.TargetManager.instance().createTarget(
           'main', i18nString(UIStrings.main), SDK.Target.Type.NODE, null);

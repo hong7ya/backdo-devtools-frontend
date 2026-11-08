@@ -45,7 +45,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         setup: kind === 'page' ? 'globalThis.seed = 2; await fetch("BACKDO_ORIGIN/effect");' : undefined,
       });
       const snapshot = await session.page.evaluate(() => window.backdoTest.snapshot());
-      const target = environment.currentTarget().session;
+      const target = environment.target;
       assert.isNull(snapshot.error);
       assert.isTrue(snapshot.calibrated);
       assert.isAbove(snapshot.estimatedReplayMs ?? 0, 0);
@@ -423,7 +423,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
 
   async function reverseAndVerify(page: Page, expected: ExpectedPosition): Promise<void> {
     const historyLength = await page.evaluate(() => window.backdoTest.historyLength());
-    const before = environment.currentTarget().session;
+    const before = environment.target;
     const initialState = await page.evaluate(() => window.backdoTest.snapshot());
     const meter = await page.waitForSelector(RECORDING_METER);
     if (!meter) {
@@ -461,7 +461,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.deepEqual(result.historyState, {backdoTest: 'preserve'});
     assert.lengthOf(result.visiblePauses, initialState.visiblePauses.length + 1, '최종 정지만 UI에 전달되어야 한다');
     assert.strictEqual(result.transitions.at(-1), 'ready');
-    const after = environment.currentTarget().session;
+    const after = environment.target;
     assert.notStrictEqual(after.pid, before.pid);
     assert.notStrictEqual(after.ws, before.ws);
     assert.strictEqual(after.port, before.port);

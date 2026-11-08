@@ -181,7 +181,9 @@ npm test -- --skip-ninja scripts/backdo/tests
 
 통합 테스트 전 형제 `server`에서 `npm ci`를 실행한다. 다른 서버 저장소 경로는 `BACKDO_SERVER_DIR`로 지정한다. 테스트는 화면과 API를 서로 다른 임시 포트에서 제공한다. 저장소 Chrome for Testing 경로를 기본으로 사용하며 다른 Chrome은 `CHROME_BIN`으로 지정한다. `BACKDO_FRONTEND_DIR`는 테스트용 정적 서버가 읽을 빌드 폴더를 지정하는 환경변수다. 제품 API 서버의 설정이 아니다. 제품 사용을 위해 테스트 도우미를 실행할 필요는 없다.
 
-개발 검증은 변경 TS를 별도 화면 디렉터리에 컴파일하여 수행했다. 프런트엔드 Mocha·Chai 단위 테스트 55개, 실제 화면 통합 테스트 12개, 서버 Mocha·Chai 테스트 6개가 통과했다. 서버 실행 파일과 기존 ws·close 명령의 실행도 확인했다. 변경 파일 ESLint, Node 테스트 TypeScript, GN 의존성과 GRD 리소스 검사도 통과했다. 실제 Node·브라우저 콘솔·inspector 경로에서 더미와 사용자의 PID·포트가 다르고, 측정 후 사용자 PID·WebSocket·위치·문서가 유지되는지 확인한다. 콘솔 준비 코드의 외부 요청이 측정 때문에 반복되지 않는지도 확인한다. `for`·`async/await`·`for...of`·연속 뒤로가기·화면 전환 검증은 유지한다. 실패·늦은 취소·3초 기준의 기록 해제도 별도로 검사한다.
+개발 검증은 변경 TS를 별도 화면 디렉터리에 컴파일하여 수행했다. 리뷰 반복 후 프런트엔드 Mocha·Chai 단위 테스트 110개, 실제 화면 통합 테스트 23개, 서버 Mocha·Chai 테스트 8개가 통과했다. 전체 프런트엔드 빌드와 별개로 변경 파일 ESLint, Node 테스트 TypeScript, GN 의존성도 검사한다.
+
+테스트의 기대 위치는 예제 원문의 조건식·증감식·함수 호출·반환 위치에서 정한다. 제품의 실행 기록을 기대값으로 읽지 않는다. `BrowserTestEnvironment`는 자원 준비와 정리만 담당하며, 측정·화면·부작용 검증은 테스트 본문에 둔다. 콘솔의 한 줄 명령, 여러 줄 붙여넣기, 줄 중단점 추가·삭제는 기존 DevTools 도우미를 재사용한다. 테스트 전용 Chrome 재시작 구현은 제거하고 실제 서버를 통해 복원한다.
 
 전체 프런트엔드 빌드는 사용자의 최종 확인 항목이다. 의존 파일을 포함한 TypeScript 검사에는 작업 전부터 있던 `front_end/panels/settings/KeybindsSettingsTab.ts:133` 타입 오류 한 건이 남아 있다.
 

@@ -54,12 +54,13 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
                   {busy: boolean, enabled: boolean, status: string, calibrating: boolean}): void {
     this.element.setAttribute('aria-busy', String(busy || calibrating));
     this.button.setEnabled(enabled && !busy && !calibrating);
+    this.element.classList.toggle('backdo-replay-disabled', !this.button.enabled);
     this.#status = status;
     if (busy || calibrating) {
       this.#status = calibrating ? '별도 더미 프로세스에서 CDP 응답 시간을 측정하고 있습니다.' : '이전 실행 위치로 복원 중입니다.';
     }
     this.#loadingLabel.textContent = calibrating ? '측정 중' : '복원 중';
-    this.button.setTitle(`${this.#status}\n${this.#usageTitle}`);
+    this.#updateTooltip();
     this.#loading.hidden = !busy && !calibrating;
   }
 
@@ -82,7 +83,15 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
     this.element.classList.toggle('recording-warning', percent >= WARNING_USAGE_PERCENT);
     this.element.classList.toggle('recording-ended', Boolean(error));
     this.#usageTitle = title;
-    this.button.setTitle(`${this.#status}\n${title}`);
+    this.#updateTooltip();
     UI.Tooltip.Tooltip.install(this.#meter, title);
+  }
+
+  #updateTooltip(): void {
+    const title = `${this.#status}\n${this.#usageTitle}`;
+    this.button.setTitle(title);
+    // 비활성 버튼이 마우스 이벤트를 받지 않아도 바깥 영역에서 사유를 확인할 수 있다.
+    UI.Tooltip.Tooltip.install(this.element, title);
+    this.element.setAttribute('aria-label', title);
   }
 }

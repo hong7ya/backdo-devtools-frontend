@@ -99,6 +99,10 @@
   overflow: hidden;
 }
 
+.backdo-replay-control.backdo-replay-disabled > devtools-button {
+  pointer-events: none;
+}
+
 .backdo-recording-fill {
   height: 100%;
   background: var(--sys-color-primary);

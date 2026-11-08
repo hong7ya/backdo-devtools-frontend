@@ -56,7 +56,7 @@ class ReplayTestHarness implements BrowserTestClient {
   replayFinished(previousLength: number): boolean {
     const reachedTarget = this.#controller.session.history.length === previousLength - 1;
     const failed = Boolean(this.#controller.session.error);
-    return !this.#controller.busy && !document.body.inert && (reachedTarget || failed);
+    return !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert && (reachedTarget || failed);
   }
 
   snapshot(): ReplaySnapshot {

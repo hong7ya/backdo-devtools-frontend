@@ -15,6 +15,8 @@ import {BrowserTestTarget, type TestTarget} from './BrowserTestTarget.js';
 import {serveTestFrontend} from './FrontendTestServer.js';
 import {NodeTestTarget} from './NodeTestTarget.js';
 
+const RECORDING_METER = 'pierce/[role="meter"][aria-label="기록 한도 사용률"]';
+const LOADING = 'pierce/.backdo-replay-loading:not([hidden])';
 const REVERSE_BUTTON = 'pierce/[data-backdo-action="reverse"]';
 const UI_TIMEOUT_MS = 15_000;
 const REPLAY_TIMEOUT_MS = 35_000;
@@ -32,6 +34,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   let target: TestTarget|undefined;
   let browser: Browser|undefined;
   let temporaryDirectory: string|undefined;
+  let beforeRestart: (() => Promise<void>)|undefined;
 
   afterEach(async () => {
     await browser?.close();
@@ -44,6 +47,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     target = undefined;
     server = undefined;
     temporaryDirectory = undefined;
+    beforeRestart = undefined;
   });
 
   for (const kind of ['node', 'page'] as const) {
@@ -100,6 +104,45 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isTrue(await reverseDisabled(session.page));
   }).timeout(60_000);
 
+  it('긴 복원 중에도 로딩이 움직이고 다른 패널로 이동할 수 있다', async () => {
+    let releaseRestart: (() => void)|undefined;
+    const gate = new Promise<void>(resolve => { releaseRestart = resolve; });
+    beforeRestart = () => gate;
+    const session = await openSession('node', 'for.js');
+    const previous = await runToReturn(session);
+    try {
+      await clickReverse(session.page);
+      const loading = await session.page.waitForSelector(LOADING, {visible: true});
+      if (!loading) {
+        assert.fail('복원 중 표시가 보여야 한다');
+      }
+      assert.isTrue(await reverseDisabled(session.page));
+      assert.isFalse(await session.page.evaluate(() => document.body.inert));
+      // 이전 구현에서 화면 전환이 만료되던 긴 대기 구간도 실제로 거친다.
+      await session.page.evaluate(() => new Promise(resolve => setTimeout(resolve, 4500)));
+      const bounds = await loading.boundingBox();
+      if (!bounds) {
+        assert.fail('복원 중 표시를 화면에서 확인할 수 있어야 한다');
+      }
+      const firstFrame = await session.page.screenshot({clip: bounds});
+      await session.page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)));
+      const nextFrame = await session.page.screenshot({clip: bounds});
+      assert.notDeepEqual(firstFrame, nextFrame, '캡처한 화면에서도 로딩이 계속 움직여야 한다');
+      const consoleTab = await session.page.waitForSelector('pierce/#tab-console', {visible: true});
+      if (!consoleTab) {
+        assert.fail('복원 중에도 콘솔 탭이 보여야 한다');
+      }
+      await consoleTab.click();
+      await session.page.waitForSelector('pierce/[aria-label="Console prompt"]', {visible: true});
+    } finally {
+      releaseRestart?.();
+    }
+    await waitForReplay(session.page, previous.length);
+    assert.isNull((await session.page.evaluate(() => window.backdoTest.snapshot())).error);
+    assert.isNull(await session.page.$(LOADING));
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
   it('소스가 바뀌면 복원을 실패 처리하고 뒤로가기 버튼을 비활성화한다', async () => {
     const session = await openSession('node', 'for.js');
     const previous = await runToReturn(session);
@@ -113,6 +156,10 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.match(result.error ?? '', /diverged/);
     const button = await session.page.$(REVERSE_BUTTON);
     assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '뒤로가기 사용 불가');
+    assert.isNull(await session.page.$(LOADING));
+    const meter = await session.page.$(RECORDING_METER);
+    assert.strictEqual(await meter?.evaluate(element => element.getAttribute('aria-valuenow')), '0');
+    assert.include(await meter?.evaluate(element => element.getAttribute('aria-valuetext')), '기록 종료');
     assert.strictEqual(session.documentRequests(), 1);
   }).timeout(60_000);
 
@@ -153,6 +200,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     await page.exposeFunction('restartBackDoTestTarget', async (address: {ws: string, kind: string}) => {
       assert.strictEqual(address.kind, kind);
       assert.strictEqual(address.ws, connectedWS);
+      await beforeRestart?.();
       connectedWS = (await currentTarget().restart()).ws;
       return connectedWS;
     });
@@ -242,12 +290,21 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     const before = currentTarget().session;
     const initialState = await page.evaluate(() => window.backdoTest.snapshot());
     const startedAt = performance.now();
+    const meter = await page.waitForSelector(RECORDING_METER);
+    if (!meter) {
+      assert.fail('기록 한도 사용률이 보여야 한다');
+    }
+    assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')),
+        `실행 위치 ${previous.length.toLocaleString('ko-KR')} /`);
 
     await clickReverse(page);
     await waitForReplay(page, previous.length);
 
     const result = await page.evaluate(() => window.backdoTest.snapshot());
     assert.isNull(result.error);
+    assert.isNull(await page.$(LOADING));
+    assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')),
+        `실행 위치 ${(previous.length - 1).toLocaleString('ko-KR')} /`);
     assert.deepEqual(result.position, previous.target);
     assert.deepEqual(result.highlight, [previous.target.lineNumber, previous.target.columnNumber]);
     assert.deepEqual(result.messages, []);

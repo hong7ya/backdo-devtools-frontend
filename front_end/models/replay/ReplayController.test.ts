@@ -23,6 +23,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     await pause(model, script, 0);
     await pause(model, script, 1);
     assert.lengthOf(controller.session.history, 2);
+    assert.strictEqual(controller.recordingUsage.positions, 2);
     assert.isNull(controller.session.error);
     assert.isFalse(controller.canReverse(model));
     assert.include(controller.status, '재시작 연동');
@@ -51,11 +52,27 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isFalse(controller.canReverse(model));
   });
 
+  it('복원 중 사용자가 콘솔 코드를 실행하면 성공으로 표시하지 않고 종료한다', async () => {
+    const {controller, model, script, target} = prepare('node');
+    controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
+    sinon.stub(target.router()!.connection(), 'disconnect').resolves();
+    await pause(model, script, 0);
+    await pause(model, script, 1);
+    const result = controller.reverse().then(() => null, error => error);
+    recordConsoleCommand(target, 'value = 2');
+    assert.include((await result).message, '복원 중 콘솔');
+    assert.isFalse(controller.busy);
+    assert.isFalse(controller.canReverse(model));
+    assert.strictEqual(controller.recordingUsage.positions, 0);
+  });
+
   it('콘솔 원문 용량 한도에 도달하면 원문과 위치를 함께 해제한다', () => {
     const {controller, target} = prepare('page');
     recordConsoleCommand(target, 'const first = 1;');
     assert.strictEqual(controller.inputCount, 1);
     recordConsoleCommand(target, 'x'.repeat(Replay.ReplayLimits.REPLAY_LIMITS.consoleBytes / 2 + 1));
+    assert.strictEqual(controller.recordingUsage.consoleBytes, 0);
+    assert.strictEqual(controller.recordingUsage.positions, 0);
     assert.include(controller.status, '실행 기록 한도');
     assert.include(controller.status, '세션을 다시 시작');
     assert.strictEqual(controller.inputCount, 0);

@@ -7,10 +7,14 @@ import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
 import type {ExecutionPosition} from './ExecutionHistory.js';
-import {RECORDING_LIMIT_MESSAGE, REPLAY_LIMITS} from './ReplayLimits.js';
+import {RECORDING_LIMIT_MESSAGE, type RecordingUsage, REPLAY_LIMITS} from './ReplayLimits.js';
 import {ReplaySession} from './ReplaySession.js';
 
+// 30초는 응답 없는 복원을 끝내기 위한 초기 대기 정책이다. 진행이 있으면 다시 계산한다.
+// 기록 보관 시간이나 복원 전체 소요 시간을 제한하는 값은 아니다.
 const REPLAY_STALL_TIMEOUT_MS = 30_000;
+// 실행은 계속 기록하되 사용량 화면 갱신은 초당 최대 10회로 묶는다.
+const USAGE_NOTIFICATION_INTERVAL_MS = 100;
 
 interface ConsoleInput {
   expression: string;
@@ -27,16 +31,19 @@ interface RecordedScript {
 
 export const enum Events {
   CHANGED = 'Changed',
+  RECORDING_CHANGED = 'RecordingChanged',
 }
 
 interface EventTypes {
   [Events.CHANGED]: void;
+  [Events.RECORDING_CHANGED]: void;
 }
 
 /** 입력 경로와 관계없이 실행 위치를 기록한다. 프로세스 재시작 방법은 외부에서 주입한다. */
 export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTypes> {
   static #instance: ReplayController;
   readonly session = new ReplaySession();
+  #lastUsageNotification = 0;
   #entryURL = '';
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
@@ -73,6 +80,16 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   get inputCount(): number {
     return this.#consoleInputs.length;
+  }
+
+  get recordingUsage(): RecordingUsage {
+    return {
+      positions: this.session.history.length,
+      consoleInputs: this.#consoleInputs.length,
+      consoleBytes: this.#consoleBytes,
+      breakpoints: this.#recordingBreakpointIds.size,
+      pendingSources: this.#consoleSources.size,
+    };
   }
 
   canReverse(model: SDK.DebuggerModel.DebuggerModel|null): boolean {
@@ -213,7 +230,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #recordConsoleInput(command: SDK.ConsoleModel.ConsoleCommand): void {
-    if (this.session.error || this.#isReplaying) {
+    if (this.session.error) {
+      return;
+    }
+    if (this.#isReplaying) {
+      this.fail(new Error('복원 중 콘솔에서 코드가 실행되어 뒤로가기를 중단했습니다. 새 세션에서 시작해 주세요.'));
       return;
     }
     if (this.#debuggerModel?.isPaused()) {
@@ -230,6 +251,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#consoleBytes += bytes;
     this.#activeConsoleInput = this.#consoleInputs.length;
     this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
+    this.#notifyStatusChanged();
   }
 
   #identifyConsoleSource(script: SDK.Script.Script): void {
@@ -400,6 +422,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       this.#recordingBreakpointIds.add(breakpoint.breakpointId);
       positions.add(key);
+      this.#notifyUsageChanged();
     }
     return {url, positions, debuggerStatements};
   }
@@ -447,6 +470,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
           this.#consoleBytes = this.#consoleInputs.reduce((sum, input) => sum + input.expression.length * 2, 0);
         }
       }
+      this.#notifyUsageChanged();
       if (disposition === 'continue') {
         await this.#resumeExecution();
         return true;
@@ -513,6 +537,16 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       resolve();
     }
     this.#progressListeners.clear();
+  }
+
+  #notifyUsageChanged(): void {
+    const now = performance.now();
+    // 내부 정지마다 패널 전체를 다시 그리지 않고 사용량만 최대 100ms마다 알린다.
+    if (now - this.#lastUsageNotification < USAGE_NOTIFICATION_INTERVAL_MS) {
+      return;
+    }
+    this.#lastUsageNotification = now;
+    this.dispatchEventToListeners(Events.RECORDING_CHANGED);
   }
 
   #notifyStatusChanged(): void {

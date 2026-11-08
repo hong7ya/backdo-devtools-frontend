@@ -8,6 +8,7 @@ import * as Protocol from '../../generated/protocol.js';
 
 import type {ExecutionPosition} from './ExecutionHistory.js';
 import type {TargetKind} from './ReplayEndpoint.js';
+import {REPLAY_LIMITS} from './ReplayLimits.js';
 import {ReplaySession} from './ReplaySession.js';
 
 const REPLAY_TIMEOUT_MS = 30_000;
@@ -47,6 +48,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #scripts = new Map<string, RecordedScript>();
   #consoleSources = new Map<string, Promise<string|null>>();
   #consoleInputs: ConsoleInput[] = [];
+  #consoleBytes = 0;
+  #idleTimer: ReturnType<typeof setTimeout>|undefined;
+  #lastActivityAt = 0;
   #activeConsoleInput: number|null = null;
   #replayGeneration = 0;
   #replayInputCount = 0;
@@ -97,6 +101,14 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#connectToTarget = connect;
   }
 
+  dispose(): void {
+    this.#releaseRecording();
+    this.session.reset();
+    Common.EventTarget.removeEventListeners(this.#listeners);
+    this.#debuggerModel?.setPauseInterceptor(null);
+    this.#debuggerModel?.setExecutionInterceptor(null);
+  }
+
   setRestartHandler(restart: (() => Promise<string>)|null): void {
     this.#restartTarget = restart;
     this.#notifyStatusChanged();
@@ -106,6 +118,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     const model = target.model(SDK.DebuggerModel.DebuggerModel);
     if (!model) {
       throw new Error('디버거를 제공하지 않는 대상입니다.');
+    }
+    if (this.#debuggerModel && !this.#isReplaying) {
+      this.#releaseRecording();
+      this.session.reset();
+      this.#entryURL = '';
     }
     Common.EventTarget.removeEventListeners(this.#listeners);
     this.#debuggerModel = model;
@@ -151,10 +168,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#rejectReplay?.(new Error(this.session.error ?? '재실행 실패'));
     this.#debuggerModel?.setExecutionInterceptor(null);
     this.#debuggerModel?.setPauseInterceptor(null);
-    for (const breakpointId of this.#recordingBreakpointIds) {
-      void this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
-    }
-    this.#recordingBreakpointIds.clear();
+    this.#releaseRecording();
     Common.Console.Console.instance().error(`BackDo: ${this.session.error}`);
     if (this.#isReplaying) {
       void this.#debuggerModel?.agent.invoke_pause();
@@ -164,6 +178,16 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #observeTarget(model: SDK.DebuggerModel.DebuggerModel): void {
+    this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.GlobalObjectCleared, () => {
+      if (!this.#isReplaying) {
+        this.#releaseRecording();
+        this.session.reset();
+        this.#entryURL = '';
+        model.setPauseInterceptor(details => this.#handlePause(details));
+        model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
+        this.#notifyStatusChanged();
+      }
+    }));
     const breakpoints = Common.Settings.Settings.instance().moduleSetting('breakpoints-active');
     this.#listeners.push(breakpoints.addChangeListener(() => {
       if (!breakpoints.get()) {
@@ -201,6 +225,14 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return;
     }
     const {expression, useCommandLineAPI, userGesture} = command;
+    const bytes = expression.length * 2;
+    if (this.#consoleInputs.length >= REPLAY_LIMITS.consoleInputs ||
+        this.#consoleBytes + bytes > REPLAY_LIMITS.consoleBytes) {
+      this.fail(new Error('콘솔 입력 기록 한도에 도달했습니다. 새 실행 컨텍스트에서 시작하세요.'));
+      return;
+    }
+    this.#consoleBytes += bytes;
+    this.#touchActivity();
     this.#activeConsoleInput = this.#consoleInputs.length;
     this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
   }
@@ -214,13 +246,24 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (!input) {
       return;
     }
+    if (this.#consoleSources.size >= REPLAY_LIMITS.pendingSources) {
+      this.fail(new Error('콘솔 소스 식별 한도에 도달했습니다.'));
+      return;
+    }
     // VM 번호와 scriptId는 재연결마다 달라진다. 원문이 일치하는 입력 순번으로 비교한다.
-    this.#consoleSources.set(script.scriptId, script.debuggerModel.agent.invoke_getScriptSource({scriptId: script.scriptId})
-        .then(source => !source.getError() && source.scriptSource === input.expression ?
-                  `backdo-console:///${index + 1}` : null, () => null));
+    const source = script.debuggerModel.agent.invoke_getScriptSource({scriptId: script.scriptId})
+                       .then(result => !result.getError() && result.scriptSource === input.expression ?
+                                 `backdo-console:///${index + 1}` : null, () => null);
+    this.#consoleSources.set(script.scriptId, source);
+    void source.then(url => {
+      if (!url && this.#consoleSources.get(script.scriptId) === source) {
+        this.#consoleSources.delete(script.scriptId);
+      }
+    });
   }
 
   #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
+    this.#touchActivity();
     this.session.beginReverse();
     this.#replayGeneration++;
     this.#isReplaying = true;
@@ -305,7 +348,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     let url = await this.#consoleSources.get(script.scriptId);
     if (!url && this.#kind === 'node' && this.#consoleInputs.length === 0 && !this.#entryURL && script.sourceURL) {
-      // 사용자가 실행한 파일을 CDP의 첫 정지에서 식별한다. 파일 경로나 명령을 요구하지 않는다.
+      // 사용자가 실행한 파일을 첫 정지에서 식별한다. 파일 경로나 명령을 요구하지 않는다.
       this.#entryURL = script.sourceURL;
     }
     if (!url && script.sourceURL && script.sourceURL === this.#entryURL) {
@@ -339,6 +382,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (positions.has(key)) {
         continue;
       }
+      if (this.#recordingBreakpointIds.size >= REPLAY_LIMITS.breakpoints) {
+        throw new Error('기록용 브레이크포인트 한도에 도달했습니다.');
+      }
       const breakpoint = await model.agent.invoke_setBreakpoint({location});
       if (breakpoint.getError()) {
         throw new Error(breakpoint.getError());
@@ -358,9 +404,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return false;
     }
     try {
+      const generation = this.#replayGeneration;
       const frame = details.callFrames[0];
       const initial = frame && !this.#scripts.has(frame.script.scriptId);
       const script = frame && await this.#recordedScript(frame.script);
+      if (generation !== this.#replayGeneration || this.session.error) {
+        return false;
+      }
       if (!frame || !script) {
         if (this.#isReplaying) {
           await this.#resumeExecution();
@@ -385,10 +435,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         userVisible: Boolean(initial) || script.debuggerStatements.has(key) || hitUserBreakpoint || pausedOnException,
       });
       this.#lastPosition = position;
+      this.#touchActivity();
       if (this.#isReplaying) {
         this.#replayedPositions++;
         if (!this.session.replaying) {
           this.#consoleInputs.splice(this.#replayInputCount);
+          this.#consoleBytes = this.#consoleInputs.reduce((sum, input) => sum + input.expression.length * 2, 0);
         }
       }
       if (disposition === 'continue') {
@@ -415,6 +467,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error('모든 정지 건너뛰기로 실행 기록이 끊겼습니다.'));
       return false;
     }
+    this.#touchActivity();
     this.session.beginExecution(command);
     this.#notifyStatusChanged();
     if (command === 'pause') {
@@ -430,6 +483,38 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (response?.getError()) {
       throw new Error(response.getError());
     }
+    this.#notifyProgress();
+  }
+
+  #touchActivity(): void {
+    this.#lastActivityAt = Date.now();
+    this.#idleTimer ??= setTimeout(() => this.#expireIfIdle(), REPLAY_LIMITS.idleMilliseconds);
+  }
+
+  #expireIfIdle(): void {
+    const remaining = REPLAY_LIMITS.idleMilliseconds - (Date.now() - this.#lastActivityAt);
+    if (remaining > 0) {
+      this.#idleTimer = setTimeout(() => this.#expireIfIdle(), remaining);
+      return;
+    }
+    this.fail(new Error('30분 동안 실행·입력 활동이 없어 기록을 해제했습니다. 새 실행 컨텍스트에서 시작하세요.'));
+  }
+
+  #releaseRecording(): void {
+    clearTimeout(this.#idleTimer);
+    this.#idleTimer = undefined;
+    this.#replayGeneration++;
+    this.session.history.clear();
+    this.#consoleInputs = [];
+    this.#consoleBytes = 0;
+    this.#consoleSources.clear();
+    this.#scripts.clear();
+    this.#activeConsoleInput = null;
+    this.#lastPosition = null;
+    for (const breakpointId of this.#recordingBreakpointIds) {
+      void this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
+    }
+    this.#recordingBreakpointIds.clear();
     this.#notifyProgress();
   }
 

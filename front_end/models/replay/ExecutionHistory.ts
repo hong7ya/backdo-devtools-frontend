@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {REPLAY_LIMITS} from './ReplayLimits.js';
+
 /** 프로세스가 바뀌어도 비교할 수 있는 위치 정보다. scriptId나 런타임 객체 ID는 기록하지 않는다. */
 export interface ExecutionPosition {
   readonly url: string;
@@ -28,7 +30,7 @@ export class ReplayPlan {
     if (!positions.length) {
       throw new Error('No previous recorded position');
     }
-    this.positions = Object.freeze(positions.map(position => Object.freeze({...position})));
+    this.positions = Object.freeze(positions.map(position => Object.isFrozen(position) ? position : Object.freeze({...position})));
   }
 
   get target(): ExecutionPosition {
@@ -56,7 +58,7 @@ export class ExecutionHistory {
   #positions: ExecutionPosition[] = [];
   readonly #limit: number;
 
-  constructor(limit = 1_000_000) {
+  constructor(limit: number = REPLAY_LIMITS.positions) {
     this.#limit = limit;
   }
 
@@ -77,6 +79,10 @@ export class ExecutionHistory {
       throw new Error('Execution history limit reached; start a new debug session');
     }
     this.#positions.push(Object.freeze({...position}));
+  }
+
+  clear(): void {
+    this.#positions = [];
   }
 
   previous(): ReplayPlan {

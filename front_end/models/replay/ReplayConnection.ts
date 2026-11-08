@@ -16,7 +16,6 @@ import {type ConnectionRequest, readConnectionRequest, replaceConnectionAddress,
 export interface TargetAddress {
   ws: string;
   kind: TargetKind;
-  pageURL?: string;
 }
 
 /** 외부 연동 계약. 더미 생성 실패·취소 때도 생성자가 소유한 프로세스를 정리해야 한다. */
@@ -160,7 +159,6 @@ export class ReplayConnection {
     const target = {...this.#address};
     if (target.kind === 'page') {
       this.#pageURLToRestore = this.#target?.inspectedURL() ?? '';
-      target.pageURL = this.#pageURLToRestore;
     }
     this.#expectedDisconnect = target.ws;
     const restartingTarget = this.#target;

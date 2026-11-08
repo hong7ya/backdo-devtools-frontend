@@ -27,7 +27,6 @@ node_ts_library("tests") {
   sources = [
     "tests/BrowserTestActions.ts",
     "tests/BrowserTestEnvironment.ts",
-    "tests/BrowserTestTarget.ts",
     "tests/FrontendTestServer.ts",
     "tests/NodeTestTarget.ts",
     "tests/browser-replay.test.ts",

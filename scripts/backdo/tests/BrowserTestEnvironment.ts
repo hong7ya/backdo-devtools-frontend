@@ -87,11 +87,11 @@ export class BrowserTestEnvironment {
     this.beforeCalibration = undefined;
   }
 
-  currentTarget() {
+  get target(): TargetDetails {
     if (!this.#application || !this.#currentSessionId) {
       throw new Error('등록된 실제 서버 세션이 없습니다.');
     }
-    return {session: this.#application.manager.get(this.#currentSessionId)};
+    return this.#application.manager.get(this.#currentSessionId);
   }
 
   async open({kind, fixture, restart = true, input = 'console', setup}: SessionOptions): Promise<TestSession> {
@@ -123,7 +123,7 @@ export class BrowserTestEnvironment {
     let initialTarget: {ws: string, pid: number, port: number};
     if (kind === 'node') {
       this.#target = new NodeTestTarget({
-        entry, args: [marker, '공백 있는 인자', ''], cwd: this.#temporaryDirectory, output: null,
+        entry, args: [marker, '공백 있는 인자', ''], cwd: this.#temporaryDirectory,
         env: {BACKDO_FIRST: '첫 번째', BACKDO_SECOND: '두 번째', BACKDO_RESTORE_CONTEXT: '사용자 값'},
       });
       initialTarget = await this.#target.start();
@@ -200,7 +200,7 @@ export class BrowserTestEnvironment {
       await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
     }
     return {page, source, entry, marker, initialTarget, documentRequests: () => documentRequests,
-      restartCount: () => this.currentTarget().session.restarts, pageErrors};
+      restartCount: () => this.target.restarts, pageErrors};
   }
 
 }

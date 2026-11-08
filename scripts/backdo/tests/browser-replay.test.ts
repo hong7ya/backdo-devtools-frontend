@@ -77,6 +77,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         const lines = helper.split('\n');
         const firstPause = lines.findIndex(line => line.trim() === 'debugger;');
         const lastPause = lines.map(line => line.trim()).lastIndexOf('debugger;');
+        const control = await session.page.waitForSelector('pierce/.backdo-replay-control');
+        assert.isNotNull(control);
+        await control?.hover();
+        assert.include(await control?.evaluate(element => element.getAttribute('title')), '기록된 이전 실행 위치');
+        assert.isTrue(await control?.evaluate(element => element.matches(':hover')));
 
         await resumeToHelper(firstPause);
         const caller = await session.page.evaluate(() => window.backdoTest.previous());

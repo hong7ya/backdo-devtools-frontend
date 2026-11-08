@@ -31,10 +31,9 @@ interface TestApplication {
   close: () => Promise<void>;
 }
 interface SessionOptions {
-  kind: 'node'|'page';
+  kind: 'node'|'console';
   fixture: string;
   restart?: boolean;
-  input?: 'console'|'page';
   setup?: string;
 }
 export interface TestSession {
@@ -94,7 +93,7 @@ export class BrowserTestEnvironment {
     return this.#application.manager.get(this.#currentSessionId);
   }
 
-  async open({kind, fixture, restart = true, input = 'console', setup}: SessionOptions): Promise<TestSession> {
+  async open({kind, fixture, restart = true, setup}: SessionOptions): Promise<TestSession> {
     this.#temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'backdo-frontend-'));
     const fixtureSource = await readFile(path.join(__dirname, '../fixtures', fixture), 'utf8');
     const code = setup ? fixtureSource.replace('i * 2', 'i * globalThis.seed') : fixtureSource;
@@ -103,17 +102,15 @@ export class BrowserTestEnvironment {
     // 비동기 예제는 함수가 반환한 Promise까지 끝난 뒤 종료 표식을 남긴다.
     const nodeCode = fixture === 'async-await.js' ?
         code.replace('asyncExample();', `asyncExample().then(() => { ${finished} });`) : `${code}\n${finished}`;
-    const source = kind === 'page' ? `debugger;\n${code}` :
+    const source = kind === 'console' ? `debugger;\n${code}` :
         `process.getBuiltinModule('fs').appendFileSync(process.argv[2], '진입\\n');\n${nodeCode}`;
     const entry = path.join(this.#temporaryDirectory, fixture);
     await writeFile(entry, source);
-    const modules: Record<string, string> = {};
     if (fixture.startsWith('modules-')) {
       const helper = await readFile(path.join(__dirname, '../fixtures/modules-helper.mjs'), 'utf8');
       await writeFile(path.join(this.#temporaryDirectory, 'modules-helper.mjs'), helper);
-      modules['/modules-helper.mjs'] = helper;
     }
-    this.#server = await serveTestFrontend(source, modules);
+    this.#server = await serveTestFrontend();
     const serverDirectory = process.env.BACKDO_SERVER_DIR || path.resolve(process.cwd(), '../server');
     const {startServer} = require(path.join(serverDirectory, 'app.js'));
     this.#application = await startServer({port: 0});
@@ -166,7 +163,7 @@ export class BrowserTestEnvironment {
         });
       });
     });
-    const entrypoint = kind === 'node' ? 'js_app.html' : input === 'page' ? 'inspector.html' : 'devtools_app.html';
+    const entrypoint = kind === 'node' ? 'js_app.html' : 'devtools_app.html';
     const url = new URL(`/${entrypoint}`, this.#server.origin);
     url.searchParams.set('backdoServer', restart ? this.#application.origin : 'http://127.0.0.1:1');
     if (kind === 'node' && fixture === 'for.js' && restart) {
@@ -178,21 +175,12 @@ export class BrowserTestEnvironment {
     await page.addScriptTag({type: 'module', url: `${this.#server.origin}/models/replay/ReplayTestHarness.js`});
     await page.waitForFunction(() => window.backdoTest?.ready(), {timeout: UI_TIMEOUT_MS});
     if (restart) {await registered;}
-    if (kind === 'page') {
-      if (input === 'page') {
-        const inspected = await puppeteer.connect({browserURL: `http://127.0.0.1:${initialTarget.port}`});
-        const inspectedPage = (await inspected.pages())[0];
-        const connection = await inspectedPage.createCDPSession();
-        await connection.send('Page.navigate', {url: `${this.#server.origin}/fixture.html`});
-        await connection.detach();
-        await inspected.disconnect();
-      } else {
-        if (setup) {
-          await enterConsoleCode(page, setup.replace('BACKDO_ORIGIN', this.#server.origin));
-          await page.waitForSelector('pierce/.console-user-command-result', {visible: true});
-        }
-        await enterConsoleCode(page, source);
+    if (kind === 'console') {
+      if (setup) {
+        await enterConsoleCode(page, setup.replace('BACKDO_ORIGIN', this.#server.origin));
+        await page.waitForSelector('pierce/.console-user-command-result', {visible: true});
       }
+      await enterConsoleCode(page, source);
     }
     if (restart) {
       await page.waitForFunction(() => window.backdoTest.calibrationFinished(), {timeout: UI_TIMEOUT_MS});

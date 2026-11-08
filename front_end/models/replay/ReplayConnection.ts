@@ -34,14 +34,13 @@ interface ConnectionOptions {
   onConnectionLost: (message: Platform.UIString.LocalizedString) => void;
 }
 
-/** 브라우저와 Node 진입점이 함께 사용하는 연결·주소 갱신 경로. */
+/** Console과 Node 진입점이 함께 사용하는 연결·주소 갱신 경로. */
 export class ReplayConnection {
   static #instance: ReplayConnection;
   #lifecycle: TargetLifecycle|null = null;
   #address: TargetAddress|null = null;
   #target: SDK.Target.Target|null = null;
   #onTargetRestartStateChanged: ConnectionOptions['onTargetRestartStateChanged'];
-  #pageURLToRestore = '';
   #expectedDisconnect: string|null = null;
   #connectionClosed: Promise<void> = Promise.resolve();
   readonly #controller: ReplayController;
@@ -73,6 +72,11 @@ export class ReplayConnection {
   }
 
   async initialize(options: ConnectionOptions, url = new URL(location.href)): Promise<boolean> {
+    // 기존 inspector 등 다른 DevTools 화면은 원래 연결 경로를 유지한다.
+    const entrypoint = url.pathname.split('/').pop();
+    if (entrypoint !== 'devtools_app.html' && entrypoint !== 'js_app.html') {
+      return false;
+    }
     this.#onTargetRestartStateChanged = options.onTargetRestartStateChanged;
     try {
       const request = readConnectionRequest(url);
@@ -137,12 +141,6 @@ export class ReplayConnection {
       throw new Error(response.getError());
     }
     replaceConnectionAddress(address);
-    if (options.kind === 'page' && this.#pageURLToRestore && this.#pageURLToRestore !== 'about:blank') {
-      const navigation = await target.pageAgent().invoke_navigate({url: this.#pageURLToRestore});
-      if (navigation.getError() || navigation.errorText) {
-        throw new Error(navigation.getError() || navigation.errorText);
-      }
-    }
   }
 
   async #discoverTarget(port: number, kind: TargetKind): Promise<string> {
@@ -157,9 +155,6 @@ export class ReplayConnection {
       throw new Error('대상 프로세스 재시작 연동이 없습니다.');
     }
     const target = {...this.#address};
-    if (target.kind === 'page') {
-      this.#pageURLToRestore = this.#target?.inspectedURL() ?? '';
-    }
     this.#expectedDisconnect = target.ws;
     const restartingTarget = this.#target;
     if (restartingTarget) {

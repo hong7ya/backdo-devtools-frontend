@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import type {BrowserTestClient, HistorySnapshot, ReplaySnapshot} from '../../../scripts/backdo/tests/BrowserTestProtocol.js';
+import type {BrowserTestClient, ReplaySnapshot} from '../../../scripts/backdo/tests/BrowserTestProtocol.js';
 import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Sources from '../../panels/sources/sources.js';
@@ -48,11 +48,6 @@ class ReplayTestHarness implements BrowserTestClient {
 
   isPausedAtLine(lineNumber: number): boolean {
     return this.#debuggerModel()?.debuggerPausedDetails()?.callFrames[0]?.location().lineNumber === lineNumber;
-  }
-
-  previous(): HistorySnapshot {
-    const history = this.#controller.session.history;
-    return {target: history.previous().target, length: history.length};
   }
 
   replayFinished(previousLength: number): boolean {

@@ -10,11 +10,6 @@ export interface RecordedPosition {
   columnNumber: number;
 }
 
-export interface HistorySnapshot {
-  target: RecordedPosition;
-  length: number;
-}
-
 export interface ReplaySnapshot {
   error: string|null;
   calibrated: boolean;
@@ -38,7 +33,6 @@ export interface BrowserTestClient {
   isPaused(): boolean;
   pauseReason(): string|null;
   isPausedAtLine(lineNumber: number): boolean;
-  previous(): HistorySnapshot;
   replayFinished(previousLength: number): boolean;
   snapshot(): ReplaySnapshot;
 }

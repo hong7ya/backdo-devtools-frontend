@@ -9,6 +9,7 @@ import type {EventListenerPausedDetailsAuxData} from './DebuggerModel.js';
 import {SDKModel} from './SDKModel.js';
 import {Capability, type Target} from './Target.js';
 import {type SDKModelObserver, TargetManager} from './TargetManager.js';
+import {apply, finishUpdates, UserBreakpoints} from './UserBreakpoints.js';
 
 export const enum InstrumentationNames {
   BEFORE_BIDDER_WORKLET_BIDDING_START = 'beforeBidderWorkletBiddingStart',
@@ -60,16 +61,14 @@ class EventListenerBreakpoint extends CategorizedBreakpoint {
     }
     super.setEnabled(enabled);
     for (const model of TargetManager.instance().models(EventBreakpointsModel)) {
-      this.updateOnModel(model);
+      void this.updateOnModel(model);
     }
   }
 
-  updateOnModel(model: EventBreakpointsModel): void {
-    if (this.enabled()) {
-      void model.agent.invoke_setInstrumentationBreakpoint({eventName: this.name});
-    } else {
-      void model.agent.invoke_removeInstrumentationBreakpoint({eventName: this.name});
-    }
+  async updateOnModel(model: EventBreakpointsModel): Promise<void> {
+    const enabled = this.enabled() && !UserBreakpoints.instance().suspended;
+    await apply(enabled ? model.agent.invoke_setInstrumentationBreakpoint({eventName: this.name}) :
+                          model.agent.invoke_removeInstrumentationBreakpoint({eventName: this.name}));
   }
 
   static readonly instrumentationPrefix = 'instrumentation:';
@@ -133,6 +132,11 @@ export class EventBreakpointsManager implements SDKModelObserver<EventBreakpoint
       InstrumentationNames.AUDIO_CONTEXT_SUSPENDED,
     ]);
 
+    UserBreakpoints.instance().register('instrumentation-breakpoints', async () => {
+      await finishUpdates(TargetManager.instance().models(EventBreakpointsModel).flatMap(model =>
+        this.#eventListenerBreakpointsInternal.filter(breakpoint => breakpoint.enabled())
+            .map(breakpoint => breakpoint.updateOnModel(model))));
+    });
     TargetManager.instance().observeModels(EventBreakpointsModel, this);
   }
 
@@ -169,7 +173,7 @@ export class EventBreakpointsManager implements SDKModelObserver<EventBreakpoint
   modelAdded(eventBreakpointModel: EventBreakpointsModel): void {
     for (const breakpoint of this.#eventListenerBreakpointsInternal) {
       if (breakpoint.enabled()) {
-        breakpoint.updateOnModel(eventBreakpointModel);
+        void breakpoint.updateOnModel(eventBreakpointModel);
       }
     }
   }

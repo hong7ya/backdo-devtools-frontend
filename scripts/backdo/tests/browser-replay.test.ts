@@ -98,6 +98,81 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     }
   }
 
+  it('UI에서 추가·삭제한 줄 중단점과 Step over·Resume을 함께 사용할 수 있다', async () => {
+    const session = await openSession('page', 'for.js');
+    const bodyLine = session.source.split('\n').findIndex(line => line.includes('const doubled'));
+    await (await lineNumberElement(session.page, bodyLine)).click();
+    await session.page.waitForSelector('pierce/.cm-breakpoint', {visible: true});
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, bodyLine);
+    await clickExecutionButton(session.page, 'Step over next function call');
+    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, bodyLine + 1);
+
+    await (await lineNumberElement(session.page, bodyLine)).click();
+    await session.page.waitForSelector('pierce/.cm-breakpoint', {hidden: true});
+    const previous = await runToReturn(session);
+    verifyFinalCondition('for.js', session.source, previous);
+    await reverseAndVerify(session.page, previous);
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
+  it('UI에서 추가한 XHR/fetch 중단점을 기록용 정지로 넘기지 않는다', async () => {
+    const session = await openSession('page', 'fetch.js', true, 'console',
+        'globalThis.endpoint = "BACKDO_ORIGIN/effect";');
+    const section = await session.page.waitForSelector('pierce/[aria-label="XHR/fetch Breakpoints"][aria-expanded]');
+    if (await section?.evaluate(element => element.getAttribute('aria-expanded')) !== 'true') {
+      await section?.click();
+    }
+    const add = await session.page.waitForSelector('pierce/[aria-label="Add XHR/fetch breakpoint"]', {visible: true});
+    await add?.click();
+    const input = await session.page.waitForSelector('pierce/[aria-label="URL Breakpoint"]', {visible: true});
+    await input?.click();
+    await session.page.keyboard.type('/effect');
+    await session.page.keyboard.press('Enter');
+    await session.page.waitForSelector('pierce/[aria-label^="URL contains"]');
+
+    const returnLine = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
+    await (await lineNumberElement(session.page, returnLine)).click();
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForFunction(line => window.backdoTest.pauseReason() === 'XHR' ||
+        window.backdoTest.isPausedAtLine(line), {}, returnLine);
+    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.pauseReason()), 'XHR');
+    assert.strictEqual(server?.effectCount(), 0, '사용자가 재개하기 전에는 요청을 보내면 안 된다');
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
+    const previous = await session.page.evaluate(() => window.backdoTest.previous());
+    await reverseAndVerify(session.page, previous);
+    await session.page.waitForSelector('pierce/[aria-label^="URL contains"]', {visible: true});
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
+  it('조건식과 로그포인트는 복원 중 실행하지 않고 복원 후 다음 실행에 다시 적용한다', async () => {
+    const session = await openSession('page', 'breakpoints.js', true, 'console',
+        'globalThis.seed = 2; globalThis.endpoint = "BACKDO_ORIGIN/effect";');
+    const bodyLine = session.source.split('\n').findIndex(line => line.includes('const doubled'));
+    await addConditionalBreakpoint(session.page, bodyLine, '(fetch(globalThis.endpoint), false)', false);
+    await addConditionalBreakpoint(session.page, bodyLine + 1, 'fetch(globalThis.endpoint)', true);
+    const previous = await runToReturn(session);
+    assert.strictEqual(server?.effectCount(), 8, '앞으로 실행할 때 조건식과 로그포인트가 각각 네 번 작동해야 한다');
+    await reverseAndVerify(session.page, previous);
+    assert.strictEqual(server?.effectCount(), 8, '복원 도중 조건식이나 로그포인트를 다시 평가하면 안 된다');
+    await session.page.waitForSelector('pierce/.cm-breakpoint-conditional', {visible: true});
+    await session.page.waitForSelector('pierce/.cm-breakpoint-logpoint', {visible: true});
+
+    const returnLine = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
+    const previousPauseCount = await session.page.evaluate(() => window.backdoTest.snapshot().visiblePauses.length);
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForFunction(({line, previousCount}) =>
+        window.backdoTest.snapshot().visiblePauses.length > previousCount && window.backdoTest.isPausedAtLine(line),
+        {}, {line: returnLine, previousCount: previousPauseCount});
+    assert.strictEqual(server?.effectCount(), 16, '복원 후에는 원래 조건식과 로그포인트가 다시 작동해야 한다');
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
   it('inspector 화면에서도 웹페이지의 스크립트를 재실행해 마지막 조건식으로 복원한다', async () => {
     const session = await openSession('page', 'for.js', true, 'page');
     const previous = await runToReturn(session);
@@ -369,22 +444,45 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     await page.keyboard.press('Enter');
   }
 
-  async function runToReturn(session: TestSession): Promise<HistorySnapshot> {
-    const lineNumber = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
-    const gutter = await session.page.waitForSelector('pierce/.cm-lineNumbers', {visible: true});
-    if (!gutter) {
-      assert.fail('소스 에디터의 줄 번호를 찾을 수 없습니다.');
-    }
-    const lines = await session.page.$$('pierce/.cm-lineNumbers .cm-gutterElement');
-    let clicked = false;
-    for (const line of lines) {
-      if (await line.evaluate((element, expected) => element.textContent === String(expected), lineNumber + 1)) {
-        await line.click();
-        clicked = true;
-        break;
+  async function lineNumberElement(page: Page, lineNumber: number) {
+    await page.waitForSelector('pierce/.cm-lineNumbers', {visible: true});
+    for (const line of await page.$$('pierce/.cm-lineNumbers .cm-gutterElement')) {
+      if (await line.evaluate((element, expected) => element.checkVisibility() && element.textContent === String(expected), lineNumber + 1)) {
+        return line;
       }
     }
-    assert.isTrue(clicked, '사용자가 클릭할 목표 줄 번호가 보여야 한다');
+    throw new Error(`소스 에디터의 ${lineNumber + 1}번째 줄 번호를 찾지 못했습니다.`);
+  }
+
+  async function addConditionalBreakpoint(page: Page, lineNumber: number, condition: string, isLogpoint: boolean):
+      Promise<void> {
+    await (await lineNumberElement(page, lineNumber)).click({button: 'right'});
+    const action = await page.waitForSelector(isLogpoint ? 'aria/Add logpoint…' : 'aria/Add conditional breakpoint…',
+        {visible: true});
+    assert.exists(action);
+    await action.click();
+    const dialog = await page.waitForSelector('pierce/.sources-edit-breakpoint-dialog', {visible: true});
+    assert.exists(dialog);
+    const editor = await dialog.waitForSelector('pierce/[aria-label="Code editor"]', {visible: true});
+    assert.exists(editor);
+    await editor.focus();
+    await page.keyboard.type(condition);
+    await page.keyboard.press('Enter');
+    await page.waitForSelector(isLogpoint ? 'pierce/.cm-breakpoint-logpoint' : 'pierce/.cm-breakpoint-conditional',
+        {visible: true});
+  }
+
+  async function clickExecutionButton(page: Page, label: string): Promise<void> {
+    const button = await page.waitForSelector(`pierce/[aria-label="${label}"]`, {visible: true});
+    if (!button) {
+      throw new Error(`${label} 버튼을 찾지 못했습니다.`);
+    }
+    await button.click();
+  }
+
+  async function runToReturn(session: TestSession): Promise<HistorySnapshot> {
+    const lineNumber = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
+    await (await lineNumberElement(session.page, lineNumber)).click();
     await session.page.waitForSelector('pierce/.cm-breakpoint', {visible: true});
     const resume = await session.page.waitForSelector('pierce/[aria-label="Resume script execution"]', {visible: true});
     if (!resume) {

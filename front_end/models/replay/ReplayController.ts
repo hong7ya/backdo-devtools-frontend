@@ -6,7 +6,7 @@ import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
-import type {ExecutionPosition} from './ExecutionHistory.js';
+import {type ExecutionPosition, samePosition} from './ExecutionHistory.js';
 import {
   RECORDING_LIMIT_MESSAGE,
   type RecordingUsage,
@@ -232,9 +232,18 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       throw new Error(this.status);
     }
     const completion = this.#beginReplay();
+    const userBreakpoints = SDK.UserBreakpoints.UserBreakpoints.instance();
     try {
       // 재실행 진행이 멈춘 연결도 대기 제한에 포함한다. 전체 재실행 시간은 제한하지 않는다.
-      await Promise.race([this.#restartAndReplay(completion.promise), completion.promise]);
+      await Promise.race([
+        (async () => {
+          await userBreakpoints.setSuspended(true);
+          if (!this.session.error) {
+            await this.#restartAndReplay(completion.promise);
+          }
+        })(),
+        completion.promise,
+      ]);
     } catch (error) {
       this.fail(error);
       throw error;
@@ -242,9 +251,17 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       completion.clearTimeout();
       this.#resolveReplay = null;
       this.#rejectReplay = null;
-      this.#isReplaying = false;
-      this.#notifyProgress();
-      this.#notifyStatusChanged();
+      try {
+        // 설정은 유지한 채 성공·실패 모두에서 중단점의 재적용 완료를 기다린다.
+        await userBreakpoints.setSuspended(false);
+      } catch (error) {
+        this.fail(error);
+        throw error;
+      } finally {
+        this.#isReplaying = false;
+        this.#notifyProgress();
+        this.#notifyStatusChanged();
+      }
     }
   }
 
@@ -528,17 +545,31 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       const {lineNumber, columnNumber} = frame.location();
       const key = `${lineNumber}:${columnNumber}`;
+      const position = {url: script.url, hash: frame.script.hash, lineNumber, columnNumber};
+      const hitRecordingBreakpoint = details.breakpointIds.some(id => this.#recordingBreakpointIds.has(id));
+      if (!initial && !hitRecordingBreakpoint && !script.debuggerStatements.has(key)) {
+        // XHR·예외 등은 같은 실행 위치에서 별도의 정지를 보낼 수 있다.
+        // 복원 중에는 해제되는 사용자 정지를 실행 방문 횟수에 더하지 않는다.
+        if (this.#isReplaying) {
+          await this.#resumeExecution();
+          return true;
+        }
+        this.session.showUserPause(
+            details.callFrames.length, Boolean(this.#lastPosition && samePosition(this.#lastPosition, position)));
+        this.#notifyStatusChanged();
+        return false;
+      }
       if (!script.positions.has(key)) {
         throw new Error('일반 브레이크포인트로 재현할 수 없는 정지 위치입니다.');
       }
-      const hitUserBreakpoint = details.breakpointIds.some(id => !this.#recordingBreakpointIds.has(id));
-      const pausedOnException = details.reason === Protocol.Debugger.PausedEventReason.Exception ||
-          details.reason === Protocol.Debugger.PausedEventReason.PromiseRejection;
-      const position = {url: script.url, hash: frame.script.hash, lineNumber, columnNumber};
+      // 기록용 ID만 있는 일반 정지만 숨긴다. XHR·DOM·이벤트·예외·수동 정지는 보존한다.
+      const onlyRecordingBreakpoint = details.reason === Protocol.Debugger.PausedEventReason.Other &&
+          details.breakpointIds.length > 0 &&
+          details.breakpointIds.every(id => this.#recordingBreakpointIds.has(id));
       const disposition = this.session.recordPause({
         position,
         depth: details.callFrames.length,
-        userVisible: Boolean(initial) || script.debuggerStatements.has(key) || hitUserBreakpoint || pausedOnException,
+        userVisible: Boolean(initial) || script.debuggerStatements.has(key) || !onlyRecordingBreakpoint,
       });
       this.#lastPosition = position;
       if (!this.#isReplaying && this.session.history.canReverse &&

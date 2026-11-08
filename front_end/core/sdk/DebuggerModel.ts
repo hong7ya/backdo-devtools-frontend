@@ -48,6 +48,7 @@ import {Script} from './Script.js';
 import {SDKModel} from './SDKModel.js';
 import {SourceMapManager} from './SourceMapManager.js';
 import {Capability, type Target, Type} from './Target.js';
+import {apply, UserBreakpoints} from './UserBreakpoints.js';
 
 const UIStrings = {
   /**
@@ -212,6 +213,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
 
     target.registerDebuggerDispatcher(new DebuggerDispatcher(this));
     this.agent = target.debuggerAgent();
+    UserBreakpoints.instance().register(this, () => this.updatePauseOnExceptions());
     this.runtimeModelInternal = (target.model(RuntimeModel) as RuntimeModel);
 
     this.#sourceMapManagerInternal = new SourceMapManager(target);
@@ -426,6 +428,10 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   }
 
   private pauseOnExceptionStateChanged(): void {
+    void this.updatePauseOnExceptions();
+  }
+
+  private async updatePauseOnExceptions(): Promise<void> {
     const pauseOnCaughtEnabled = Common.Settings.Settings.instance().moduleSetting('pause-on-caught-exception').get();
     let state: Protocol.Debugger.SetPauseOnExceptionsRequestState;
 
@@ -440,7 +446,10 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     } else {
       state = Protocol.Debugger.SetPauseOnExceptionsRequestState.None;
     }
-    void this.agent.invoke_setPauseOnExceptions({state});
+    if (UserBreakpoints.instance().suspended) {
+      state = Protocol.Debugger.SetPauseOnExceptionsRequestState.None;
+    }
+    await apply(this.agent.invoke_setPauseOnExceptions({state}));
   }
 
   private asyncStackTracesStateChanged(): Promise<Protocol.ProtocolResponseWithError> {
@@ -1014,6 +1023,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   }
 
   override dispose(): void {
+    UserBreakpoints.instance().unregister(this);
     if (this.#debuggerId) {
       debuggerIdToModel.delete(this.#debuggerId);
     }

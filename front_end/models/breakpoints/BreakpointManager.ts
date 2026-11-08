@@ -69,6 +69,9 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     this.#workspace = workspace;
     this.targetManager = targetManager;
     this.debuggerWorkspaceBinding = debuggerWorkspaceBinding;
+    SDK.UserBreakpoints.UserBreakpoints.instance().register('line-breakpoints', async () => {
+      await SDK.UserBreakpoints.finishUpdates([...this.#breakpointByStorageId.values()].map(breakpoint => breakpoint.updateBreakpoint()));
+    });
 
     this.storage.mute();
     this.#setInitialBreakpoints(restoreInitialBreakpointCount ?? INITIAL_RESTORE_BREAKPOINT_COUNT);
@@ -911,6 +914,11 @@ export class Breakpoint implements SDK.TargetManager.SDKModelObserver<SDK.Debugg
 
   async #updateModel(model: ModelBreakpoint): Promise<void> {
     const result = await model.scheduleUpdateInDebugger();
+    if (SDK.UserBreakpoints.UserBreakpoints.instance().updating &&
+        (result === DebuggerUpdateResult.ERROR_BACKEND || result === DebuggerUpdateResult.ERROR_BREAKPOINT_CLASH)) {
+      // 복구 실패로 사용자가 만든 설정까지 지우지 않는다.
+      throw new Error('줄 중단점을 다시 적용하지 못했습니다. 설정은 보존했습니다.');
+    }
     if (result === DebuggerUpdateResult.ERROR_BACKEND) {
       await this.remove(true /* keepInStorage */);
     } else if (result === DebuggerUpdateResult.ERROR_BREAKPOINT_CLASH) {
@@ -996,6 +1004,11 @@ export class ModelBreakpoint {
   async #updateInDebugger(): Promise<DebuggerUpdateResult> {
     if (this.#debuggerModel.target().isDisposed()) {
       this.cleanUpAfterDebuggerIsGone();
+      return DebuggerUpdateResult.OK;
+    }
+    if (SDK.UserBreakpoints.UserBreakpoints.instance().suspended) {
+      // 조건식·로그포인트를 평가하지 않되, UI 설정과 익명 스크립트의 해시는 보존한다.
+      await this.resetBreakpoint();
       return DebuggerUpdateResult.OK;
     }
     const lineNumber = this.#breakpoint.lineNumber();
@@ -1147,7 +1160,8 @@ export class ModelBreakpoint {
       return;
     }
     this.resetLocations();
-    await Promise.all(this.#breakpointIds.map(id => this.#debuggerModel.removeBreakpoint(id)));
+    await SDK.UserBreakpoints.finishUpdates(this.#breakpointIds.map(id =>
+      SDK.UserBreakpoints.apply(this.#debuggerModel.agent.invoke_removeBreakpoint({breakpointId: id}))));
     this.didRemoveFromDebugger();
     this.#currentState = null;
   }

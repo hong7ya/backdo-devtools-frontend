@@ -12,6 +12,8 @@ node_ts_library("browser_test_protocol") {
 copy_to_gen("fixtures") {
   sources = [
     "fixtures/async-await.js",
+    "fixtures/breakpoints.js",
+    "fixtures/fetch.js",
     "fixtures/for-of-break.js",
     "fixtures/for.js",
   ]

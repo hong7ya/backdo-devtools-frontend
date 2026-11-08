@@ -29,6 +29,57 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.include(controller.status, '재시작 연동');
   });
 
+  it('기록용 중단점과 함께 전달된 XHR 정지도 사용자에게 보여 준다', async () => {
+    const prepared = prepare('node');
+    const {model, script} = prepared;
+    await calibrate(prepared);
+    const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    model.resume();
+    model.resumedScript();
+    resume.resetHistory();
+    await pause(model, script, 1, Protocol.Debugger.PausedEventReason.XHR, ['1']);
+    sinon.assert.notCalled(resume);
+    assert.strictEqual(model.debuggerPausedDetails()?.reason, Protocol.Debugger.PausedEventReason.XHR);
+  });
+
+  it('같은 위치의 XHR 추가 정지는 표시하되 재실행 방문 횟수에 더하지 않는다', async () => {
+    const prepared = prepare('node');
+    const {controller, model, script} = prepared;
+    await calibrate(prepared);
+    sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    await model.resume();
+    await pause(model, script, 1);
+    const length = controller.session.history.length;
+    await pause(model, script, 1, Protocol.Debugger.PausedEventReason.XHR, []);
+    assert.strictEqual(model.debuggerPausedDetails()?.reason, Protocol.Debugger.PausedEventReason.XHR);
+    assert.strictEqual(controller.session.history.length, length);
+    assert.isTrue(controller.canReverse(model));
+    await controller.reverse();
+    assert.isNull(controller.session.error);
+  });
+
+  it('재시작 전에 사용자 중단점을 해제하고 실패해도 복구를 마친 뒤 버튼을 돌려준다', async () => {
+    const prepared = prepare('node');
+    const {controller, model, script} = prepared;
+    await calibrate(prepared);
+    await pause(model, script, 1);
+    const activation = SDK.UserBreakpoints.UserBreakpoints.instance();
+    const changes: boolean[] = [];
+    activation.register('test-user-breakpoints', async () => {
+      changes.push(activation.suspended);
+      assert.isTrue(controller.busy);
+    });
+    controller.setRestartHandler(async () => {
+      assert.isTrue(activation.suspended);
+      throw new Error('재시작 실패');
+    });
+    const error = await controller.reverse().then(() => null, error => error);
+    assert.include(error.message, '재시작 실패');
+    assert.deepEqual(changes, [true, false]);
+    assert.isFalse(controller.busy);
+    assert.isFalse(activation.suspended);
+  });
+
   it('콘솔에서 입력한 익명 소스에 파일 경로 없이 일반 브레이크포인트를 설치한다', async () => {
     const {controller, model, script, target, expression} = prepare('page');
     recordConsoleCommand(target, expression);
@@ -188,6 +239,7 @@ function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
   controller.configure(async () => {});
   const target = createTarget();
   const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
+  sinon.stub(model.agent, 'invoke_setPauseOnExceptions').resolves({getError: () => undefined});
   const scriptId = 'script' as Protocol.Runtime.ScriptId;
   const expression = 'debugger;\nconst value = 1;';
   const url = (kind === 'node' ? 'file:///user-cli.js' : '') as SDK.Script.Script['sourceURL'];
@@ -227,7 +279,9 @@ function recordConsoleCommand(target: SDK.Target.Target, expression: string): vo
   });
 }
 
-async function pause(model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script, lineNumber: number): Promise<void> {
+async function pause(
+    model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script, lineNumber: number,
+    reason = Protocol.Debugger.PausedEventReason.Other, breakpointIds: string[] = [String(lineNumber)]): Promise<void> {
   await model.pausedScript([{
     callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
     functionName: '',
@@ -235,5 +289,5 @@ async function pause(model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.
     url: script.sourceURL,
     scopeChain: [],
     this: {type: Protocol.Runtime.RemoteObjectType.Object},
-  }], Protocol.Debugger.PausedEventReason.Other, undefined, []);
+  }], reason, undefined, breakpointIds);
 }

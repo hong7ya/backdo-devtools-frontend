@@ -89,6 +89,7 @@ devtools_module("sdk") {
     "Target.ts",
     "TargetManager.ts",
     "TraceObject.ts",
+    "UserBreakpoints.ts",
     "WebAuthnModel.ts",
   ]
 
@@ -182,6 +183,7 @@ ts_library("unittests") {
     "Target.test.ts",
     "TargetManager.test.ts",
     "TraceObject.test.ts",
+    "UserBreakpoints.test.ts",
   ]
 
   deps = [

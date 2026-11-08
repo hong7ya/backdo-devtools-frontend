@@ -54,6 +54,16 @@ export class BrowserTestTarget implements TestTarget {
     return await this.start();
   }
 
+  async navigate(url: string): Promise<void> {
+    const page = (await this.#browser?.pages())?.[0];
+    if (!page) {
+      throw new Error('이동할 테스트 페이지가 없습니다.');
+    }
+    const connection = await page.createCDPSession();
+    await connection.send('Page.navigate', {url});
+    await connection.detach();
+  }
+
   async close(): Promise<void> {
     await this.#browser?.close();
     this.#browser = undefined;

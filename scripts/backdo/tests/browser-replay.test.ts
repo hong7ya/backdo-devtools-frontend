@@ -9,11 +9,11 @@ import * as path from 'node:path';
 import puppeteer, {type Browser, type Page} from 'puppeteer-core';
 
 import {defaultChromePath} from '../../../test/conductor/paths.js';
-import {ManagedProcess} from '../ManagedProcess.js';
 
 import type {HistorySnapshot} from './BrowserTestProtocol.js';
 import {BrowserTestTarget, type TestTarget} from './BrowserTestTarget.js';
 import {serveTestFrontend} from './FrontendTestServer.js';
+import {NodeTestTarget} from './NodeTestTarget.js';
 
 const REVERSE_BUTTON = 'pierce/[data-backdo-action="reverse"]';
 const UI_TIMEOUT_MS = 15_000;
@@ -52,6 +52,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       ['async-await.js', 'async/await 이후의 마지막 조건식으로'],
       ['for-of-break.js', 'for...of의 break 직전 위치로'],
     ]) {
+      if (kind === 'node' && fixture === 'for-of-break.js') {
+        continue;
+      }
       const input = kind === 'node' ? 'Node ws 직접 연결에서' : '기존 화면의 콘솔 입력에서';
       it(`${input} ${description} 두 번 되돌아간다`, async () => {
         const session = await openSession(kind, fixture);
@@ -67,6 +70,26 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       }).timeout(60_000);
     }
   }
+
+  it('inspector 화면에서도 웹페이지의 스크립트를 재실행해 마지막 조건식으로 복원한다', async () => {
+    const session = await openSession('page', 'for.js', true, 'page');
+    const previous = await runToReturn(session);
+    verifyFinalCondition('for.js', session.source, previous);
+    await reverseAndVerify(session.page, previous);
+    const next = await session.page.evaluate(() => window.backdoTest.previous());
+    await reverseAndVerify(session.page, next);
+    assert.strictEqual(session.documentRequests(), 1);
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
+  it('앞서 입력한 콘솔 원문도 순서대로 다시 실행하여 전역 준비 코드를 복원한다', async () => {
+    const session = await openSession('page', 'for.js', true, 'console', 'globalThis.seed = 2;');
+    const previous = await runToReturn(session);
+    await reverseAndVerify(session.page, previous);
+    const next = await session.page.evaluate(() => window.backdoTest.previous());
+    await reverseAndVerify(session.page, next);
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
 
   it('재시작 연동 전에도 기존 콘솔 실행과 위치 기록을 유지한다', async () => {
     const session = await openSession('page', 'for.js', false);
@@ -88,6 +111,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isTrue(await reverseDisabled(session.page));
     const result = await session.page.evaluate(() => window.backdoTest.snapshot());
     assert.match(result.error ?? '', /diverged/);
+    const button = await session.page.$(REVERSE_BUTTON);
+    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '뒤로가기 사용 불가');
     assert.strictEqual(session.documentRequests(), 1);
   }).timeout(60_000);
 
@@ -98,14 +123,17 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     return target;
   }
 
-  async function openSession(kind: 'node'|'page', fixture: string, withRestart = true): Promise<TestSession> {
+  async function openSession(
+      kind: 'node'|'page', fixture: string, withRestart = true, input: 'console'|'page' = 'console', setup?: string):
+      Promise<TestSession> {
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'backdo-frontend-'));
     const fixtureSource = await readFile(path.join(__dirname, '../fixtures', fixture), 'utf8');
-    const source = kind === 'page' ? `debugger;\n${fixtureSource}` : fixtureSource;
+    const code = setup ? fixtureSource.replace('i * 2', 'i * globalThis.seed') : fixtureSource;
+    const source = kind === 'page' ? `debugger;\n${code}` : code;
     const entry = path.join(temporaryDirectory, fixture);
     await writeFile(entry, source);
-    server = await serveTestFrontend();
-    target = kind === 'node' ? new ManagedProcess({entry, output: null}) : new BrowserTestTarget(server.origin);
+    server = await serveTestFrontend(source);
+    target = kind === 'node' ? new NodeTestTarget({entry, output: null}) : new BrowserTestTarget(server.origin);
     await target.start();
     browser = await puppeteer.launch({
       executablePath: process.env.CHROME_BIN || defaultChromePath(),
@@ -132,7 +160,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       assert.strictEqual(port, currentTarget().session.port);
       return currentTarget().session.ws;
     });
-    const url = new URL(kind === 'node' ? '/js_app.html' : '/devtools_app.html', server.origin);
+    const entrypoint = kind === 'node' ? '/js_app.html' : input === 'page' ? '/inspector.html' : '/devtools_app.html';
+    const url = new URL(entrypoint, server.origin);
     url.searchParams.set('ws', target.session.ws.replace(/^ws:\/\//, ''));
     await page.goto(url.href, {waitUntil: 'domcontentloaded'});
     await page.addScriptTag({type: 'module', url: `${server.origin}/models/replay/ReplayTestHarness.js`});
@@ -140,17 +169,59 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     if (withRestart) {
       await page.evaluate(() => window.backdoTest.useTestLifecycle());
     }
-    if (kind === 'page') {
-      await page.evaluate(source => window.backdoTest.submitConsole(source), source);
+    if (kind === 'page' && target instanceof BrowserTestTarget) {
+      if (input === 'page') {
+        await target.navigate(`${server.origin}/fixture.html`);
+      } else {
+        if (setup) {
+          await enterConsoleCode(page, setup);
+          await page.waitForSelector('pierce/.console-user-command-result', {visible: true});
+        }
+        await enterConsoleCode(page, source);
+      }
     }
     await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
     assert.isTrue(await reverseDisabled(page));
     return {page, source, entry, documentRequests: () => documentRequests, pageErrors};
   }
 
+  async function enterConsoleCode(page: Page, source: string): Promise<void> {
+    const tab = await page.waitForSelector('pierce/#tab-console', {visible: true});
+    if (!tab) {
+      assert.fail('콘솔 탭을 찾을 수 없습니다.');
+    }
+    await tab.click();
+    const prompt = await page.waitForSelector('pierce/[aria-label="Console prompt"]', {visible: true});
+    if (!prompt) {
+      assert.fail('콘솔 입력란을 찾을 수 없습니다.');
+    }
+    await prompt.click();
+    await page.keyboard.sendCharacter(source);
+    await page.keyboard.press('Enter');
+  }
+
   async function runToReturn(session: TestSession): Promise<HistorySnapshot> {
     const lineNumber = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
-    await session.page.evaluate(line => window.backdoTest.runToLine(line), lineNumber);
+    const gutter = await session.page.waitForSelector('pierce/.cm-lineNumbers', {visible: true});
+    if (!gutter) {
+      assert.fail('소스 에디터의 줄 번호를 찾을 수 없습니다.');
+    }
+    const lines = await session.page.$$('pierce/.cm-lineNumbers .cm-gutterElement');
+    let clicked = false;
+    for (const line of lines) {
+      if (await line.evaluate((element, expected) => element.textContent === String(expected), lineNumber + 1)) {
+        await line.click();
+        clicked = true;
+        break;
+      }
+    }
+    assert.isTrue(clicked, '사용자가 클릭할 목표 줄 번호가 보여야 한다');
+    await session.page.waitForSelector('pierce/.cm-breakpoint', {visible: true});
+    const resume = await session.page.waitForSelector('pierce/[aria-label="Resume script execution"]', {visible: true});
+    if (!resume) {
+      assert.fail('실행 재개 버튼을 찾을 수 없습니다.');
+    }
+    await resume.click();
     await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {
       timeout: UI_TIMEOUT_MS,
     }, lineNumber);

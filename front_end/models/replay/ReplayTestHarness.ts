@@ -36,38 +36,12 @@ class ReplayTestHarness implements BrowserTestClient {
     return Boolean(this.#debuggerModel()?.target().model(SDK.RuntimeModel.RuntimeModel)?.defaultExecutionContext());
   }
 
-  submitConsole(expression: string): void {
-    const target = this.#debuggerModel()?.target();
-    const context = target?.model(SDK.RuntimeModel.RuntimeModel)?.defaultExecutionContext();
-    const consoleModel = target?.model(SDK.ConsoleModel.ConsoleModel);
-    if (!context || !consoleModel) {
-      throw new Error('콘솔 입력을 실행할 대상이 없습니다.');
-    }
-    const message = consoleModel.addCommandMessage(context, expression);
-    void consoleModel.evaluateCommandInConsole(context, message, expression, true);
-  }
-
   historyLength(): number {
     return this.#controller.session.history.length;
   }
 
   isPaused(): boolean {
     return this.#debuggerModel()?.isPaused() ?? false;
-  }
-
-  async runToLine(lineNumber: number): Promise<void> {
-    const model = this.#debuggerModel();
-    const frame = model?.debuggerPausedDetails()?.callFrames[0];
-    if (!model || !frame) {
-      throw new Error('테스트를 진행할 정지 위치가 없습니다.');
-    }
-    const breakpoint = await model.agent.invoke_setBreakpointByUrl({
-      scriptHash: frame.script.hash, lineNumber, columnNumber: 2,
-    });
-    if (breakpoint.getError()) {
-      throw new Error(breakpoint.getError());
-    }
-    model.resume();
   }
 
   isPausedAtLine(lineNumber: number): boolean {

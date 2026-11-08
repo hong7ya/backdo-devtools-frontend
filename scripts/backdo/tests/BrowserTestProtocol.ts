@@ -32,10 +32,8 @@ export interface ReplaySnapshot {
 export interface BrowserTestClient {
   useTestLifecycle(): void;
   ready(): boolean;
-  submitConsole(expression: string): void;
   historyLength(): number;
   isPaused(): boolean;
-  runToLine(lineNumber: number): Promise<void>;
   isPausedAtLine(lineNumber: number): boolean;
   previous(): HistorySnapshot;
   replayFinished(previousLength: number): boolean;

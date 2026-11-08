@@ -14,14 +14,14 @@ const STARTUP_LOG_LIMIT = 8192;
 
 type TargetProcess = ChildProcessByStdio<null, Readable, Readable>;
 
-export interface ManagedTarget {
+interface NodeTestSession {
   ws: string;
   entryURL: string;
   pid: number;
   port: number;
 }
 
-export interface ProcessOptions {
+interface NodeTestOptions {
   entry: string;
   args?: string[];
   cwd?: string;
@@ -29,28 +29,28 @@ export interface ProcessOptions {
   output?: Pick<NodeJS.WritableStream, 'write'>|null;
 }
 
-/** 직접 실행한 자식 프로세스만 관리한다. 포트나 PID로 다른 프로세스를 찾아 종료하지 않는다. */
-export class ManagedProcess {
-  readonly #options: ProcessOptions;
+/** 테스트가 직접 실행한 Node만 관리한다. 실제 사용자의 터미널 실행을 테스트 안에서 대신한다. */
+export class NodeTestTarget {
+  readonly #options: NodeTestOptions;
   #child: TargetProcess|null = null;
-  #session: ManagedTarget|null = null;
+  #session: NodeTestSession|null = null;
   #inspectorPort: number;
-  #restartTask: Promise<ManagedTarget>|null = null;
+  #restartTask: Promise<NodeTestSession>|null = null;
   #closed = false;
 
-  constructor(options: ProcessOptions) {
+  constructor(options: NodeTestOptions) {
     this.#options = options;
     this.#inspectorPort = options.port ?? 0;
   }
 
-  get session(): ManagedTarget {
+  get session(): NodeTestSession {
     if (!this.#child || !this.#session || this.#child.exitCode !== null || this.#child.signalCode !== null) {
       throw new Error('디버깅 대상 프로세스가 실행 중이 아닙니다.');
     }
     return this.#session;
   }
 
-  async start(): Promise<ManagedTarget> {
+  async start(): Promise<NodeTestSession> {
     if (this.#closed || this.#child) {
       throw new Error('종료되었거나 이미 실행 중인 프로세스 관리기입니다.');
     }
@@ -74,7 +74,7 @@ export class ManagedProcess {
     }
   }
 
-  async restart(): Promise<ManagedTarget> {
+  async restart(): Promise<NodeTestSession> {
     if (this.#closed || this.#restartTask) {
       throw new Error('실행 관리기가 종료되었거나 재시작이 이미 진행 중입니다.');
     }
@@ -88,12 +88,12 @@ export class ManagedProcess {
 
   async close(): Promise<void> {
     this.#closed = true;
-    // 서버 종료와 재시작 요청이 겹쳐도 새 자식 프로세스가 남지 않게 한다.
+    // 테스트 종료와 재시작이 겹쳐도 새 자식 프로세스가 남지 않게 한다.
     await this.#restartTask?.catch(() => {});
     await this.#stopTarget();
   }
 
-  async #replaceTarget(): Promise<ManagedTarget> {
+  async #replaceTarget(): Promise<NodeTestSession> {
     await this.#stopTarget();
     return await this.start();
   }

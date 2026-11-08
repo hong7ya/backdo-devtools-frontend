@@ -45,6 +45,7 @@ devtools_module("sources") {
     "OutlineQuickOpen.ts",
     "Plugin.ts",
     "ProfilePlugin.ts",
+    "ReplayToolbar.ts",
     "ReplayTransition.ts",
     "ResourceOriginPlugin.ts",
     "ScopeChainSidebarPane.ts",

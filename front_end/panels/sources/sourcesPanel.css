@@ -78,3 +78,69 @@
 .navigator-tabbed-pane {
   background-color: var(--sys-color-cdt-base-container);
 }
+
+.backdo-replay-control {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  flex: 0 0 48px;
+  height: 26px;
+  view-transition-name: backdo-control;
+}
+
+.backdo-recording-meter {
+  position: absolute;
+  bottom: 1px;
+  left: 4px;
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--sys-color-tonal-container);
+  overflow: hidden;
+}
+
+.backdo-recording-fill {
+  height: 100%;
+  background: var(--sys-color-primary);
+}
+
+.backdo-replay-control.recording-warning .backdo-recording-fill {
+  background: var(--sys-color-error);
+}
+
+.backdo-replay-control.recording-ended .backdo-recording-meter {
+  outline: 1px solid var(--sys-color-error);
+}
+
+.backdo-replay-control[aria-busy="true"] > devtools-button {
+  visibility: hidden;
+}
+
+.backdo-replay-loading:not([hidden]) {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding-bottom: 3px;
+  color: var(--sys-color-on-surface);
+  font-size: 10px;
+}
+
+.backdo-replay-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--sys-color-primary);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: backdo-spin 800ms linear infinite;
+}
+
+@keyframes backdo-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdo-replay-spinner { animation: none; }
+}

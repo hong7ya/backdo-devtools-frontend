@@ -52,6 +52,7 @@ import * as Snippets from '../snippets/snippets.js';
 import {CallStackSidebarPane} from './CallStackSidebarPane.js';
 import {DebuggerPausedMessage} from './DebuggerPausedMessage.js';
 import {NavigatorView} from './NavigatorView.js';
+import {ReplayToolbar} from './ReplayToolbar.js';
 import {withReplayTransition} from './ReplayTransition.js';
 import sourcesPanelStyles from './sourcesPanel.css.js';
 import {Events, SourcesView} from './SourcesView.js';
@@ -215,7 +216,8 @@ export class SourcesPanel extends UI.Panel.Panel implements
   private extensionSidebarPanesContainer?: UI.View.ViewLocation;
   sidebarPaneView?: UI.Widget.VBox|UI.SplitWidget.SplitWidget;
   #lastPausedTarget: WeakRef<SDK.Target.Target>|null = null;
-  #reverseButton?: UI.Toolbar.ToolbarButton;
+  #replayToolbar?: ReplayToolbar;
+  #reverseTransitionAbort?: AbortController;
   #reverseTransition = false;
 
   constructor() {
@@ -329,6 +331,8 @@ export class SourcesPanel extends UI.Panel.Panel implements
     this.lastModificationTime = -Infinity;
     Replay.ReplayController.ReplayController.instance().addEventListener(
         Replay.ReplayController.Events.CHANGED, () => void this.updateDebuggerButtonsAndStatus());
+    Replay.ReplayController.ReplayController.instance().addEventListener(
+        Replay.ReplayController.Events.RECORDING_CHANGED, () => this.updateReplayUsage());
   }
 
   static instance(opts: {
@@ -417,6 +421,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
   }
 
   override willHide(): void {
+    this.#reverseTransitionAbort?.abort();
     super.willHide();
     UI.Context.Context.instance().setFlavor(SourcesPanel, null);
     const wrapperView = UI.Context.Context.instance().flavor(QuickSourceView);
@@ -726,8 +731,8 @@ export class SourcesPanel extends UI.Panel.Panel implements
 
     const replay = Replay.ReplayController.ReplayController.instance();
     const busy = replay.busy || this.#reverseTransition;
-    this.#reverseButton?.setEnabled(!busy && replay.canReverse(currentDebuggerModel));
-    this.#reverseButton?.setTitle(replay.status);
+    this.#replayToolbar?.updateState({busy, enabled: replay.canReverse(currentDebuggerModel), status: replay.status});
+    this.updateReplayUsage();
     if (busy) {
       this.togglePauseAction.setEnabled(false);
       this.stepOverAction.setEnabled(false);
@@ -742,6 +747,11 @@ export class SourcesPanel extends UI.Panel.Panel implements
     if (details) {
       this.updateDebuggerButtonsAndStatusForTest();
     }
+  }
+
+  private updateReplayUsage(): void {
+    const replay = Replay.ReplayController.ReplayController.instance();
+    this.#replayToolbar?.updateUsage(replay.recordingUsage, replay.session.error);
   }
 
   private updateDebuggerButtonsAndStatusForTest(): void {
@@ -878,9 +888,10 @@ export class SourcesPanel extends UI.Panel.Panel implements
     const editor = this.sourcesViewInternal.currentSourceFrame()?.textEditor.editor;
     const scroll = editor ? {top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft} : null;
     this.#reverseTransition = true;
+    this.#reverseTransitionAbort = new AbortController();
     void this.updateDebuggerButtonsAndStatus();
     try {
-      await withReplayTransition(async () => {
+      await withReplayTransition(this.element, this.#reverseTransitionAbort.signal, async () => {
         await replay.reverse();
         await this.callFrameChanged();
         await this.waitForReplayHighlight(scroll);
@@ -889,6 +900,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
       Common.Console.Console.instance().error(`BackDo: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       this.#reverseTransition = false;
+      this.#reverseTransitionAbort = undefined;
       void this.updateDebuggerButtonsAndStatus();
     }
   }
@@ -979,14 +991,9 @@ export class SourcesPanel extends UI.Panel.Panel implements
     debugToolbar.appendToolbarItem(UI.Toolbar.Toolbar.createActionButton(this.stepOutAction));
     debugToolbar.appendToolbarItem(UI.Toolbar.Toolbar.createActionButton(this.stepAction));
 
-    const goToPrevLineButton = new UI.Toolbar.ToolbarButton('Go to previous recorded position', 'go-to-prev-line');
-    goToPrevLineButton.element.dataset.backdoAction = 'reverse';
-    this.#reverseButton = goToPrevLineButton;
-    goToPrevLineButton.setEnabled(false);
-
-    goToPrevLineButton.addEventListener(UI.Toolbar.ToolbarButton.Events.CLICK, this.goToPrevLine, this);
-
-    debugToolbar.appendToolbarItem(goToPrevLineButton);
+    this.#replayToolbar = new ReplayToolbar();
+    this.#replayToolbar.button.addEventListener(UI.Toolbar.ToolbarButton.Events.CLICK, this.goToPrevLine, this);
+    debugToolbar.appendToolbarItem(this.#replayToolbar);
 
     debugToolbar.appendSeparator();
     debugToolbar.appendToolbarItem(UI.Toolbar.Toolbar.createActionButton(this.toggleBreakpointsActiveAction));

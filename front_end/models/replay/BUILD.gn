@@ -11,6 +11,7 @@ devtools_module("replay") {
   sources = [
     "ExecutionHistory.ts",
     "ReplayController.ts",
+    "ReplayEndpoint.ts",
     "ReplaySession.ts",
   ]
   deps = [
@@ -36,6 +37,7 @@ ts_library("unittests") {
   sources = [
     "ExecutionHistory.test.ts",
     "ReplayController.test.ts",
+    "ReplayEndpoint.test.ts",
     "ReplaySession.test.ts",
   ]
   deps = [

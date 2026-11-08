@@ -7,6 +7,7 @@ import type * as Platform from '../../core/platform/platform.js';
 import * as ProtocolClient from '../../core/protocol_client/protocol_client.js';
 import * as SDK from '../../core/sdk/sdk.js';
 
+import {LocalTargetLifecycle} from './LocalTargetLifecycle.js';
 import {type CalibrationProcess, measureRoundTrip} from './ReplayCalibration.js';
 import {ReplayController} from './ReplayController.js';
 import {type ConnectionRequest, readConnectionRequest, replaceConnectionAddress, type TargetKind, validateWebSocketURL} from './ReplayEndpoint.js';
@@ -21,6 +22,7 @@ export interface TargetAddress {
 export interface TargetLifecycle {
   discover(port: number, kind: TargetKind): Promise<string>;
   restart(target: TargetAddress): Promise<string>;
+  prepare?(): Promise<void>;
   createCalibrationProcess?(kind: TargetKind, signal: AbortSignal): Promise<CalibrationProcess>;
 }
 
@@ -28,6 +30,7 @@ interface ConnectionOptions {
   kind: TargetKind;
   name: string;
   onTargetCreated: (target: SDK.Target.Target) => void;
+  onTargetRestartStateChanged?: (target: SDK.Target.Target, restarting: boolean) => void;
   onConnectionLost: (message: Platform.UIString.LocalizedString) => void;
 }
 
@@ -37,7 +40,10 @@ export class ReplayConnection {
   #lifecycle: TargetLifecycle|null = null;
   #address: TargetAddress|null = null;
   #target: SDK.Target.Target|null = null;
+  #onTargetRestartStateChanged: ConnectionOptions['onTargetRestartStateChanged'];
   #pageURLToRestore = '';
+  #expectedDisconnect: string|null = null;
+  #connectionClosed: Promise<void> = Promise.resolve();
   readonly #controller: ReplayController;
 
   constructor(controller = ReplayController.instance()) {
@@ -51,6 +57,7 @@ export class ReplayConnection {
 
   setLifecycle(lifecycle: TargetLifecycle|null): void {
     this.#lifecycle = lifecycle;
+    this.#controller.setPreparationHandler(lifecycle?.prepare?.bind(lifecycle) ?? null);
     this.#controller.setRestartHandler(lifecycle ? () => this.#restartTarget() : null);
     const createProcess = lifecycle?.createCalibrationProcess?.bind(lifecycle);
     this.#controller.setCalibrationHandler(createProcess ? async signal => {
@@ -64,12 +71,29 @@ export class ReplayConnection {
   }
 
   async initialize(options: ConnectionOptions, url = new URL(location.href)): Promise<boolean> {
+    this.#onTargetRestartStateChanged = options.onTargetRestartStateChanged;
     try {
       const request = readConnectionRequest(url);
       if (!request) {
         return false;
       }
-      const ws = await this.resolve(request, options.kind);
+      let ws: string;
+      if (this.#lifecycle) {
+        ws = await this.resolve(request, options.kind);
+      } else {
+        const lifecycle = new LocalTargetLifecycle(url);
+        try {
+          ws = await lifecycle.register(request, options.kind);
+          this.setLifecycle(lifecycle);
+        } catch (error) {
+          if (!('ws' in request)) {
+            throw error;
+          }
+          // 서버가 꺼져 있어도 기존 ws의 일반 디버깅은 유지한다. 재시작과 측정은 활성화하지 않는다.
+          Common.Console.Console.instance().warn(`BackDo 로컬 서버: ${error instanceof Error ? error.message : String(error)}`);
+          ws = request.ws;
+        }
+      }
       const connect = (address: string): Promise<void> => this.#connectTarget(address, options);
       this.#controller.configure(connect);
       await SDK.Connections.initMainConnection(() => connect(ws), options.onConnectionLost);
@@ -85,8 +109,14 @@ export class ReplayConnection {
 
   async #connectTarget(ws: string, options: ConnectionOptions): Promise<void> {
     const address = validateWebSocketURL(ws);
+    let notifyClosed: () => void = () => {};
+    this.#connectionClosed = new Promise(resolve => { notifyClosed = resolve; });
     ProtocolClient.InspectorBackend.Connection.setFactory(() => new SDK.Connections.WebSocketConnection(
         address as Platform.DevToolsPath.UrlString, message => {
+          notifyClosed();
+          if (this.#expectedDisconnect === address) {
+            return;
+          }
           this.#controller.fail(new Error(message));
           if (!this.#controller.busy) {
             options.onConnectionLost(message);
@@ -129,6 +159,21 @@ export class ReplayConnection {
       this.#pageURLToRestore = this.#target?.inspectedURL() ?? '';
       target.pageURL = this.#pageURLToRestore;
     }
-    return validateWebSocketURL(await this.#lifecycle.restart(target));
+    this.#expectedDisconnect = target.ws;
+    const restartingTarget = this.#target;
+    if (restartingTarget) {
+      this.#onTargetRestartStateChanged?.(restartingTarget, true);
+    }
+    try {
+      const ws = validateWebSocketURL(await this.#lifecycle.restart(target));
+      // 서버가 프로세스를 종료해 발생한 close와 SDK 대상 해제가 끝난 뒤 새 연결을 만든다.
+      await this.#connectionClosed;
+      return ws;
+    } finally {
+      if (restartingTarget) {
+        this.#onTargetRestartStateChanged?.(restartingTarget, false);
+      }
+      this.#expectedDisconnect = null;
+    }
   }
 }

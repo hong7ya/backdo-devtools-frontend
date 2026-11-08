@@ -1052,6 +1052,7 @@ grd_files_debug_sources = [
   "front_end/models/persistence/workspaceSettingsTab.css.js",
   "front_end/models/project_settings/ProjectSettingsModel.js",
   "front_end/models/replay/ExecutionHistory.js",
+  "front_end/models/replay/LocalTargetLifecycle.js",
   "front_end/models/replay/ReplayCalibration.js",
   "front_end/models/replay/ReplayConnection.js",
   "front_end/models/replay/ReplayController.js",

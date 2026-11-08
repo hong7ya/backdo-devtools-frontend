@@ -7,7 +7,6 @@ import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Sources from '../../panels/sources/sources.js';
 
-import {ReplayConnection} from './ReplayConnection.js';
 import {ReplayController} from './ReplayController.js';
 
 /** 브라우저 안에서만 사용하는 통합 테스트 도우미. Node 테스트에는 직렬화 가능한 결과만 전달한다. */
@@ -23,17 +22,6 @@ class ReplayTestHarness implements BrowserTestClient {
     history.replaceState({backdoTest: 'preserve'}, '');
     this.#observeVisiblePauses();
     this.#observeTransitions();
-  }
-
-  useTestLifecycle(): void {
-    ReplayConnection.instance().setLifecycle({
-      discover: (port, kind) => window.discoverBackDoTestTarget(port, kind),
-      restart: target => window.restartBackDoTestTarget(target),
-      createCalibrationProcess: async kind => {
-        const ws = await window.createBackDoCalibrationProcess(kind);
-        return {ws, dispose: () => window.disposeBackDoCalibrationProcess(ws)};
-      },
-    });
   }
 
   ready(): boolean {

@@ -54,9 +54,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
 
   it('복원 중 사용자가 콘솔 코드를 실행하면 성공으로 표시하지 않고 종료한다', async () => {
     const {controller, model, script, target} = prepare('node');
-    controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
-    sinon.stub(target.router()!.connection(), 'disconnect').resolves();
-    await pause(model, script, 0);
+    await calibrate({controller, model, script, target});
     await pause(model, script, 1);
     const result = controller.reverse().then(() => null, error => error);
     recordConsoleCommand(target, 'value = 2');
@@ -82,15 +80,16 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   it('사용자 대기는 기록을 유지하고 예상 복원이 3초에 도달하면 기록 전체를 종료한다', async () => {
     const clock = sinon.useFakeTimers();
     try {
-      const {controller, model, script} = prepare('node');
+      const prepared = prepare('node');
+      const {controller, model, script} = prepared;
+      await calibrate(prepared);
       sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
-      await pause(model, script, 0);
       await clock.tickAsync(60_000);
       assert.isNull(controller.session.error);
       assert.lengthOf(controller.session.history, 1);
 
       await model.resume();
-      await clock.tickAsync(1600);
+      await clock.tickAsync(2600);
       await pause(model, script, 1);
       assert.include(controller.session.error ?? '', '예상 복원 시간이 3초');
       assert.isFalse(controller.canReverse(model));
@@ -100,6 +99,15 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     } finally {
       clock.restore();
     }
+  });
+
+  it('최초 측정만으로 3초가 걸리면 진행 기록을 해제하고 재측정을 반복하지 않는다', async () => {
+    const prepared = prepare('node');
+    await calibrate(prepared, 3000);
+    assert.include(prepared.controller.session.error ?? '', '예상 복원 시간이 3초');
+    assert.isFalse(prepared.controller.canCalibrate(prepared.model));
+    assert.isFalse(prepared.controller.canReverse(prepared.model));
+    assert.lengthOf(prepared.controller.session.history, 0);
   });
 
   it('실행 컨텍스트가 교체되면 이전 입력과 위치를 비우고 새 기록을 받는다', () => {
@@ -117,13 +125,12 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const clock = sinon.useFakeTimers();
     let finishConnect: (() => void)|undefined;
     try {
-      const {controller, model, script, target} = prepare('node');
+      const prepared = prepare('node');
+      const {controller, model, script} = prepared;
+      await calibrate(prepared);
       controller.configure(() => new Promise<void>(resolve => {
         finishConnect = resolve;
       }));
-      controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
-      sinon.stub(target.router()!.connection(), 'disconnect').resolves();
-      await pause(model, script, 0);
       await pause(model, script, 1);
       await pause(model, script, 0);
       await pause(model, script, 1);
@@ -169,6 +176,17 @@ function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
   }));
   controller.attach(target);
   return {controller, target, model, script, expression};
+}
+
+async function calibrate(
+    {controller, model, script, target}: Pick<ReturnType<typeof prepare>, 'controller'|'model'|'script'|'target'>,
+    elapsedMs = 400): Promise<void> {
+  controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
+  sinon.stub(target.router()!.connection(), 'disconnect').resolves();
+  controller.configure(async () => await pause(model, script, 0));
+  await pause(model, script, 0);
+  await controller.calibrate();
+  controller.recordReplayDuration(elapsedMs);
 }
 
 function recordConsoleCommand(target: SDK.Target.Target, expression: string): void {

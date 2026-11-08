@@ -24,6 +24,7 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
   readonly #meter: HTMLDivElement;
   readonly #fill: HTMLDivElement;
   readonly #loading: HTMLSpanElement;
+  readonly #loadingLabel: HTMLSpanElement;
   #status = '';
   #usageTitle = '';
 
@@ -45,13 +46,19 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
     this.#loading.setAttribute('role', 'status');
     this.#loading.hidden = true;
     this.#loading.createChild('span', 'backdo-replay-spinner').setAttribute('aria-hidden', 'true');
-    this.#loading.createChild('span').textContent = '복원 중';
+    this.#loadingLabel = this.#loading.createChild('span');
+    this.#loadingLabel.textContent = '복원 중';
   }
 
-  updateState({busy, enabled, status}: {busy: boolean, enabled: boolean, status: string}): void {
+  updateState({busy, enabled, status, calibrating}:
+                  {busy: boolean, enabled: boolean, status: string, calibrating: boolean}): void {
     this.element.setAttribute('aria-busy', String(busy));
     this.button.setEnabled(enabled && !busy);
-    this.#status = busy ? '이전 실행 위치로 복원 중입니다.' : status;
+    this.#status = status;
+    if (busy) {
+      this.#status = calibrating ? '최초 정지 위치를 다시 열어 복원 시간을 측정하고 있습니다.' : '이전 실행 위치로 복원 중입니다.';
+    }
+    this.#loadingLabel.textContent = calibrating ? '측정 중' : '복원 중';
     this.button.setTitle(`${this.#status}\n${this.#usageTitle}`);
     this.#loading.hidden = !busy;
   }

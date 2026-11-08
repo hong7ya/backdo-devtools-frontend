@@ -36,6 +36,11 @@ class ReplayTestHarness implements BrowserTestClient {
     return Boolean(this.#debuggerModel()?.target().model(SDK.RuntimeModel.RuntimeModel)?.defaultExecutionContext());
   }
 
+  calibrationFinished(): boolean {
+    return !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
+        (this.#controller.calibrated || Boolean(this.#controller.session.error));
+  }
+
   historyLength(): number {
     return this.#controller.session.history.length;
   }
@@ -63,6 +68,8 @@ class ReplayTestHarness implements BrowserTestClient {
     const position = this.#controller.currentPosition;
     return {
       error: this.#controller.session.error,
+      calibrated: this.#controller.calibrated,
+      estimatedReplayMs: this.#controller.estimatedReplayMs,
       position,
       highlight: this.#highlightedPosition(),
       messages: Common.Console.Console.instance().messages().map(message => message.text).filter(

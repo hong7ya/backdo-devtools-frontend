@@ -218,7 +218,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
   #lastPausedTarget: WeakRef<SDK.Target.Target>|null = null;
   #replayToolbar?: ReplayToolbar;
   #reverseTransitionAbort?: AbortController;
-  #reverseTransition = false;
+  #reverseTransition: 'calibration'|'reverse'|null = null;
 
   constructor() {
     super('sources');
@@ -330,7 +330,10 @@ export class SourcesPanel extends UI.Panel.Panel implements
     SDK.TargetManager.TargetManager.instance().observeTargets(this);
     this.lastModificationTime = -Infinity;
     Replay.ReplayController.ReplayController.instance().addEventListener(
-        Replay.ReplayController.Events.CHANGED, () => void this.updateDebuggerButtonsAndStatus());
+        Replay.ReplayController.Events.CHANGED, () => {
+          void this.updateDebuggerButtonsAndStatus();
+          this.calibrateReplayIfNeeded();
+        });
     Replay.ReplayController.ReplayController.instance().addEventListener(
         Replay.ReplayController.Events.RECORDING_CHANGED, () => this.updateReplayUsage());
   }
@@ -418,6 +421,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
       SourcesPanel.updateResizerAndSidebarButtons(this);
     }
     this.editorView.setMainWidget(this.sourcesViewInternal);
+    this.calibrateReplayIfNeeded();
   }
 
   override willHide(): void {
@@ -528,6 +532,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
           this.overlayLoggables.debuggerPausedMessage);
     }
     this.#lastPausedTarget = new WeakRef(details.debuggerModel.target());
+    this.calibrateReplayIfNeeded();
   }
 
   private maybeLogOverlayAction(): void {
@@ -730,8 +735,11 @@ export class SourcesPanel extends UI.Panel.Panel implements
     }
 
     const replay = Replay.ReplayController.ReplayController.instance();
-    const busy = replay.busy || this.#reverseTransition;
-    this.#replayToolbar?.updateState({busy, enabled: replay.canReverse(currentDebuggerModel), status: replay.status});
+    const busy = replay.busy || Boolean(this.#reverseTransition);
+    this.#replayToolbar?.updateState({
+      busy, enabled: replay.canReverse(currentDebuggerModel), status: replay.status,
+      calibrating: this.#reverseTransition === 'calibration',
+    });
     this.updateReplayUsage();
     if (busy) {
       this.togglePauseAction.setEnabled(false);
@@ -798,6 +806,9 @@ export class SourcesPanel extends UI.Panel.Panel implements
   }
 
   togglePause(): boolean {
+    if (this.#reverseTransition) {
+      return true;
+    }
     const target = UI.Context.Context.instance().flavor(SDK.Target.Target);
     if (!target) {
       return true;
@@ -820,6 +831,9 @@ export class SourcesPanel extends UI.Panel.Panel implements
   }
 
   private prepareToResume(): SDK.DebuggerModel.DebuggerModel|null {
+    if (this.#reverseTransition) {
+      return null;
+    }
     if (!this.pausedInternal) {
       return null;
     }
@@ -879,33 +893,58 @@ export class SourcesPanel extends UI.Panel.Panel implements
     return true;
   }
 
+  private calibrateReplayIfNeeded(): void {
+    if (this.isShowing()) {
+      void this.restoreReplay('calibration');
+    }
+  }
+
   private async goToPrevLine(): Promise<void> {
+    await this.restoreReplay('reverse');
+  }
+
+  private async restoreReplay(operation: 'calibration'|'reverse'): Promise<void> {
     const replay = Replay.ReplayController.ReplayController.instance();
     const target = UI.Context.Context.instance().flavor(SDK.Target.Target);
-    if (this.#reverseTransition || !replay.canReverse(target?.model(SDK.DebuggerModel.DebuggerModel) ?? null)) {
+    const model = target?.model(SDK.DebuggerModel.DebuggerModel) ?? null;
+    const allowed = operation === 'calibration' ? replay.canCalibrate(model) : replay.canReverse(model);
+    if (this.#reverseTransition || !allowed) {
       return;
     }
-    const startedAt = performance.now();
+    let startedAt: number|null = null;
     const editor = this.sourcesViewInternal.currentSourceFrame()?.textEditor.editor;
     const scroll = editor ? {top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft} : null;
-    this.#reverseTransition = true;
+    this.#reverseTransition = operation;
     this.#reverseTransitionAbort = new AbortController();
     let restored = false;
     void this.updateDebuggerButtonsAndStatus();
     try {
+      if (operation === 'calibration') {
+        // 최초 정지의 하이라이트가 준비된 뒤 같은 화면 전환 경로로 측정을 시작한다.
+        await this.callFrameChanged();
+        await this.waitForReplayHighlight(scroll);
+      }
+      startedAt = performance.now();
       await withReplayTransition(this.element, this.#reverseTransitionAbort.signal, async () => {
-        await replay.reverse();
+        if (operation === 'calibration') {
+          await replay.calibrate();
+        } else {
+          await replay.reverse();
+        }
         restored = true;
         await this.callFrameChanged();
         await this.waitForReplayHighlight(scroll);
       });
     } catch (error) {
+      if (operation === 'calibration') {
+        replay.fail(error);
+      }
       Common.Console.Console.instance().error(`BackDo: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      if (restored) {
+      if (restored && startedAt !== null) {
         replay.recordReplayDuration(performance.now() - startedAt);
       }
-      this.#reverseTransition = false;
+      this.#reverseTransition = null;
       this.#reverseTransitionAbort = undefined;
       void this.updateDebuggerButtonsAndStatus();
     }

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// 제품 기준: 뒤로가기 클릭부터 최종 화면 표시까지 3초 미만. 관측 전 비용은 추정값이다.
+// 제품 기준: 뒤로가기 클릭부터 최종 화면 표시까지 3초 미만. 최초 실측 전에는 예상 시간을 만들지 않는다.
 export const REPLAY_RESPONSE_BUDGET_MS = 3_000;
 
 export const REPLAY_TIME_LIMIT_MESSAGE =

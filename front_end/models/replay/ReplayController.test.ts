@@ -95,12 +95,21 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isTrue(requests.every(call => !('condition' in call.args[0])));
   });
 
-  it('일시정지 중 콘솔 실행은 기존 지역 상태를 복원할 수 있다고 표시하지 않는다', async () => {
-    const {controller, model, script, target} = prepare('node');
-    await pause(model, script, 0);
-    recordConsoleCommand(target, 'value = 2');
-    assert.include(controller.session.error ?? '', '일시정지 중 콘솔');
-    assert.isFalse(controller.canReverse(model));
+  it('일시정지 중 콘솔 조회·수정은 재실행 입력에 넣지 않고 거꾸로가기를 유지한다', async () => {
+    const prepared = prepare('node');
+    const {controller, model, script, target} = prepared;
+    await calibrate(prepared);
+    await pause(model, script, 1);
+    const usage = controller.recordingUsage;
+    for (const expression of ['value', 'value = 2']) {
+      recordConsoleCommand(target, expression);
+      assert.isNull(controller.session.error);
+      assert.deepEqual(controller.recordingUsage, usage);
+      assert.isTrue(controller.canReverse(model));
+    }
+    await controller.reverse();
+    assert.isNull(controller.session.error);
+    assert.lengthOf(controller.session.history, 1);
   });
 
   it('복원 중 사용자가 콘솔 코드를 실행하면 성공으로 표시하지 않고 종료한다', async () => {

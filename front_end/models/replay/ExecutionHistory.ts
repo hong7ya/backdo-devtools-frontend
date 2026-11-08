@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/** Stable across processes; scriptId and runtime object IDs deliberately are not recorded. */
+/** 프로세스가 바뀌어도 비교할 수 있는 위치 정보다. scriptId나 런타임 객체 ID는 기록하지 않는다. */
 export interface ExecutionPosition {
   readonly url: string;
   readonly hash: string;
@@ -19,7 +19,7 @@ function describe(position: ExecutionPosition): string {
   return `${position.url}:${position.lineNumber + 1}:${position.columnNumber + 1}`;
 }
 
-/** Compares every event, not just the final line or its visit count. */
+/** 목표 줄과 방문 횟수뿐 아니라, 처음부터 목표까지 모든 위치의 순서를 비교한다. */
 export class ReplayPlan {
   readonly positions: readonly ExecutionPosition[];
   #nextIndex = 0;
@@ -51,7 +51,7 @@ export class ReplayPlan {
   }
 }
 
-/** Execution locations only: no locals, heap, closures, return values, or external inputs. */
+/** 실행 위치만 기록한다. 지역 변수, 힙, 클로저, 반환값, 외부 입력은 저장하지 않는다. */
 export class ExecutionHistory {
   #positions: ExecutionPosition[] = [];
   readonly #limit: number;
@@ -90,7 +90,7 @@ export class ExecutionHistory {
     if (!plan.complete) {
       throw new Error('Cannot commit an incomplete replay');
     }
-    // A subsequent Resume/Step records a new future from the restored position.
+    // 복원 후 Resume·Step을 실행하면 복원 지점부터 새로운 실행 이력을 기록한다.
     this.#positions = [...plan.positions];
   }
 }

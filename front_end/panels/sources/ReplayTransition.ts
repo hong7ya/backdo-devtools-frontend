@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/** Keep the old document snapshot until replay and the final editor update finish. */
+/** 재실행과 최종 에디터 갱신이 끝날 때까지 이전 화면의 스냅샷을 유지한다. */
 export async function withReplayTransition(update: () => Promise<void>): Promise<void> {
   const wasInert = document.body.inert;
   document.body.inert = true;
@@ -25,7 +25,7 @@ export async function withReplayTransition(update: () => Promise<void>): Promise
       return;
     }
     const transition = document.startViewTransition(update);
-    // Browsers may skip a transition (hidden tab, long replay). The replay still has to finish.
+    // 숨겨진 탭이나 긴 재실행에서는 전환이 생략될 수 있지만, 재실행 완료는 계속 기다린다.
     void transition.ready.catch(() => {});
     const finished = transition.finished.catch(() => {});
     await transition.updateCallbackDone;

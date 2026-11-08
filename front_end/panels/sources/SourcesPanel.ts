@@ -172,6 +172,10 @@ const UIStrings = {
 };
 const str_ = i18n.i18n.registerUIStrings('panels/sources/SourcesPanel.ts', UIStrings);
 const i18nString = i18n.i18n.getLocalizedString.bind(undefined, str_);
+const REPLAY_HIGHLIGHT_TIMEOUT_MS = 2000;
+const REPLAY_HIGHLIGHT_POLL_INTERVAL_MS = 16;
+const REPLAY_DECORATIONS_SETTLE_MS = 80;
+
 const primitiveRemoteObjectTypes = new Set(['number', 'boolean', 'bigint', 'undefined']);
 let sourcesPanelInstance: SourcesPanel;
 
@@ -890,14 +894,14 @@ export class SourcesPanel extends UI.Panel.Panel implements
   }
 
   private async waitForReplayHighlight(scroll: {top: number, left: number}|null): Promise<void> {
-    const deadline = performance.now() + 2000;
+    const deadline = performance.now() + REPLAY_HIGHLIGHT_TIMEOUT_MS;
     while (performance.now() < deadline) {
       const callFrame = UI.Context.Context.instance().flavor(SDK.DebuggerModel.CallFrame);
       const location = callFrame &&
           await Bindings.DebuggerWorkspaceBinding.DebuggerWorkspaceBinding.instance().rawLocationToUILocation(
               callFrame.location());
       if (!location) {
-        await new Promise(resolve => setTimeout(resolve, 16));
+        await new Promise(resolve => setTimeout(resolve, REPLAY_HIGHLIGHT_POLL_INTERVAL_MS));
         continue;
       }
       const frame = this.sourcesViewInternal.currentSourceFrame();
@@ -914,13 +918,13 @@ export class SourcesPanel extends UI.Panel.Panel implements
               editor.scrollDOM.scrollLeft = scroll.left;
             }
           }
-          // Let the final scope/value decorations settle without depending on animation frames,
-          // which View Transitions can suspend while the update callback is pending.
-          await new Promise(resolve => setTimeout(resolve, 80));
+          // 최종 스코프와 값 표시가 반영될 시간을 둔다. 화면 전환 콜백이 끝나기 전에는
+          // 애니메이션 프레임이 멈출 수 있으므로 requestAnimationFrame에는 의존하지 않는다.
+          await new Promise(resolve => setTimeout(resolve, REPLAY_DECORATIONS_SETTLE_MS));
           return;
         }
       }
-      await new Promise(resolve => setTimeout(resolve, 16));
+      await new Promise(resolve => setTimeout(resolve, REPLAY_HIGHLIGHT_POLL_INTERVAL_MS));
     }
     throw new Error('The process was restored, but the editor highlight did not become ready');
   }
@@ -976,6 +980,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
     debugToolbar.appendToolbarItem(UI.Toolbar.Toolbar.createActionButton(this.stepAction));
 
     const goToPrevLineButton = new UI.Toolbar.ToolbarButton('Go to previous recorded position', 'go-to-prev-line');
+    goToPrevLineButton.element.dataset.backdoAction = 'reverse';
     this.#reverseButton = goToPrevLineButton;
     goToPrevLineButton.setEnabled(false);
 

@@ -4,69 +4,69 @@
 
 import * as Replay from './replay.js';
 
-describe('ReplaySession', () => {
+describe('재실행 세션', () => {
   const {ReplaySession} = Replay.ReplaySession;
   const pause = (lineNumber: number, depth = 1, userVisible = false) => ({
     position: {url: 'file:///entry.js', hash: 'v1', lineNumber, columnNumber: 0}, depth, userVisible,
   });
 
-  it('records hidden Resume pauses, then publishes only the replay destination', () => {
+  it('Resume 중간 위치를 기록하고 복원할 때 최종 정지만 화면에 전달한다', () => {
     const session = new ReplaySession();
-    assert.isTrue(session.accept(pause(0, 1, true)));
-    session.command('resume');
-    assert.isFalse(session.accept(pause(1)));
-    assert.isTrue(session.accept(pause(2, 1, true)));
+    assert.strictEqual(session.recordPause(pause(0, 1, true)), 'show');
+    session.beginExecution('resume');
+    assert.strictEqual(session.recordPause(pause(1)), 'continue');
+    assert.strictEqual(session.recordPause(pause(2, 1, true)), 'show');
     assert.deepEqual(session.beginReverse(), pause(1).position);
-    assert.isFalse(session.accept(pause(0, 1, true)));
-    assert.isTrue(session.accept(pause(1)));
+    assert.strictEqual(session.recordPause(pause(0, 1, true)), 'continue');
+    assert.strictEqual(session.recordPause(pause(1)), 'show');
     assert.isTrue(session.canReverse);
     assert.lengthOf(session.history, 2);
     assert.deepEqual(session.beginReverse(), pause(0).position);
-    assert.isTrue(session.accept(pause(0, 1, true)));
+    assert.strictEqual(session.recordPause(pause(0, 1, true)), 'show');
     assert.isFalse(session.canReverse);
   });
 
-  it('steps over nested calls while recording their positions', () => {
+  it('Step over로 중첩 호출을 건너뛰면서 내부 실행 위치도 기록한다', () => {
     const session = new ReplaySession();
-    session.accept(pause(0, 2));
-    session.command('step-over');
-    assert.isFalse(session.accept(pause(1, 3)));
-    assert.isTrue(session.accept(pause(2, 2)));
+    session.recordPause(pause(0, 2));
+    session.beginExecution('step-over');
+    assert.strictEqual(session.recordPause(pause(1, 3)), 'continue');
+    assert.strictEqual(session.recordPause(pause(2, 2)), 'show');
     assert.deepEqual(session.beginReverse(), pause(1).position);
   });
 
-  it('steps out to a shallower stack and honors user breakpoints in nested calls', () => {
+  it('Step out은 호출자에서 멈추고 사용자 브레이크포인트는 중첩 호출에서도 지킨다', () => {
     const session = new ReplaySession();
-    session.accept(pause(0, 3));
-    session.command('step-out');
-    assert.isFalse(session.accept(pause(1, 3)));
-    assert.isTrue(session.accept(pause(2, 2)));
-    session.command('step-over');
-    assert.isTrue(session.accept(pause(3, 4, true)));
+    session.recordPause(pause(0, 3));
+    session.beginExecution('step-out');
+    assert.strictEqual(session.recordPause(pause(1, 3)), 'continue');
+    assert.strictEqual(session.recordPause(pause(2, 2)), 'show');
+    session.beginExecution('step-over');
+    assert.strictEqual(session.recordPause(pause(3, 4, true)), 'show');
   });
 
-  it('rejects diverging replay without replacing history', () => {
+  it('재실행 경로가 달라지면 기존 이력을 유지한 채 실패 처리한다', () => {
     const session = new ReplaySession();
-    session.accept(pause(0));
-    session.accept(pause(1));
+    session.recordPause(pause(0));
+    session.recordPause(pause(1));
     session.beginReverse();
-    assert.throws(() => session.accept(pause(9)), /diverged/);
-    session.fail(new Error('Different execution path'));
-    assert.strictEqual(session.error, 'Different execution path');
+    assert.throws(() => session.recordPause(pause(9)), /diverged/);
+    session.fail(new Error('다른 실행 경로'));
+    assert.strictEqual(session.error, '다른 실행 경로');
     assert.isFalse(session.canReverse);
     assert.lengthOf(session.history, 2);
-    assert.throws(() => session.command('resume'), /Different execution path/);
+    assert.throws(() => session.beginExecution('resume'), /다른 실행 경로/);
   });
 
-  it('does not reverse from an unrecorded source or while replaying', () => {
+  it('기록 대상 밖의 정지와 재실행 중에는 뒤로가기를 허용하지 않는다', () => {
     const session = new ReplaySession();
-    session.accept(pause(0));
-    session.accept(pause(1));
+    session.recordPause(pause(0));
+    session.recordPause(pause(1));
     session.unrecordedPause();
     assert.isFalse(session.canReverse);
-    session.accept(pause(2));
+    session.recordPause(pause(2));
     session.beginReverse();
     assert.isFalse(session.canReverse);
-    assert.throws(() => session.command('resume'), /in progress/);
+    assert.throws(() => session.beginExecution('resume'), /in progress/);
   });
 });

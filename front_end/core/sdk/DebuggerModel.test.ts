@@ -457,8 +457,8 @@ describe('DebuggerModel', () => {
   });
 });
 
-describeWithMockConnection('DebuggerModel replay interception', () => {
-  it('hides internal pause/resume pairs before bindings or UI receive them', async () => {
+describeWithMockConnection('디버거의 기록용 정지 처리', () => {
+  it('내부 정지와 재개 이벤트를 바인딩이나 UI에 전달하지 않는다', async () => {
     const model = createTarget().model(SDK.DebuggerModel.DebuggerModel)!;
     const paused = sinon.spy();
     const resumed = sinon.spy();
@@ -467,7 +467,7 @@ describeWithMockConnection('DebuggerModel replay interception', () => {
     model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, resumed);
     model.setBeforePausedCallback(beforePaused);
     model.setPauseInterceptor(async () => {
-      // A resumed event can arrive before the asynchronous interceptor returns.
+      // 비동기 가로채기 콜백이 반환되기 전에 resumed 이벤트가 도착하는 경우를 재현한다.
       model.resumedScript();
       return true;
     });
@@ -483,7 +483,7 @@ describeWithMockConnection('DebuggerModel replay interception', () => {
     sinon.assert.calledOnce(beforePaused);
   });
 
-  it('preserves native Resume when no execution interceptor handles the command', () => {
+  it('명령을 가로채지 않는 경우 기존 Resume 동작을 유지한다', () => {
     const model = createTarget().model(SDK.DebuggerModel.DebuggerModel)!;
     const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
     const intercept = sinon.stub().returns(true);

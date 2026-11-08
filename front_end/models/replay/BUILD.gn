@@ -35,7 +35,23 @@ ts_library("unittests") {
   testonly = true
   sources = [
     "ExecutionHistory.test.ts",
+    "ReplayController.test.ts",
     "ReplaySession.test.ts",
   ]
-  deps = [ ":bundle" ]
+  deps = [
+    ":bundle",
+    "../../testing",
+  ]
+}
+
+ts_library("browser_test_support") {
+  testonly = true
+  sources = [ "ReplayTestHarness.ts" ]
+  deps = [
+    ":bundle",
+    "../../../scripts/backdo:browser_test_protocol",
+    "../../core/common:bundle",
+    "../../core/sdk:bundle",
+    "../../panels/sources:bundle",
+  ]
 }

@@ -3,23 +3,23 @@
 // found in the LICENSE file.
 
 import {assert} from 'chai';
-import {describe, it} from 'mocha';
 import {mkdtemp, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import path from 'node:path';
+import * as path from 'node:path';
 
-import {serveBackDo} from '../debug.mjs';
+import {type BackDoServer, serveBackDo} from '../DebugServer.js';
 
-describe('BackDo process manager', () => {
-  it('restart replaces the owned PID and WebSocket on the same inspector port; control is authenticated', async () => {
+describe('BackDo 프로세스 관리기', () => {
+  it('인증된 요청만 허용하고 같은 포트에서 PID와 WebSocket을 교체한다', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'backdo-process-'));
-    let app;
+    let app: BackDoServer|undefined;
     try {
       await writeFile(path.join(directory, 'js_app.html'), '<title>BackDo</title>');
       await writeFile(path.join(directory, 'entry.js'), 'const a = 1;\nconsole.log(a);');
       app = await serveBackDo({entry: path.join(directory, 'entry.js'), frontend: directory, output: null});
       const headers = {'X-BackDo-Session': app.token};
-      const session = () => fetch(`${app.origin}/__backdo/session`, {headers}).then(r => r.json());
+      const origin = app.origin;
+      const session = () => fetch(`${origin}/__backdo/session`, {headers}).then(r => r.json());
       const first = await session();
       assert.isAbove(first.pid, 0);
       assert.strictEqual((await fetch(app.url)).status, 200);
@@ -37,7 +37,7 @@ describe('BackDo process manager', () => {
       assert.strictEqual(second.entryURL, first.entryURL);
       assert.throws(() => process.kill(first.pid, 0), /ESRCH/);
       await app.close();
-      app = null;
+      app = undefined;
       assert.throws(() => process.kill(second.pid, 0), /ESRCH/);
     } finally {
       await app?.close();

@@ -25,6 +25,8 @@ copy_to_gen("fixtures") {
 
 node_ts_library("tests") {
   sources = [
+    "tests/BrowserTestActions.ts",
+    "tests/BrowserTestEnvironment.ts",
     "tests/BrowserTestTarget.ts",
     "tests/FrontendTestServer.ts",
     "tests/NodeTestTarget.ts",
@@ -34,6 +36,8 @@ node_ts_library("tests") {
     ":browser_test_protocol",
     "../../front_end/models/replay:browser_test_support",
     "../../test/conductor:implementation",
+    "../../test/e2e/helpers",
+    "../../test/shared",
   ]
 }
 

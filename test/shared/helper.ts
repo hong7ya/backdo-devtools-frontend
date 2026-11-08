@@ -179,16 +179,14 @@ export const pressKey =
   }
 };
 
-export const pasteText = async (text: string) => {
-  const {frontend} = getBrowserAndPages();
+export const pasteText = async (text: string, frontend = getBrowserAndPages().frontend) => {
   await frontend.keyboard.sendCharacter(text);
 };
 
 // Get a single element handle. Uses `pierce` handler per default for piercing Shadow DOM.
 export const $ =
     async<ElementType extends Element = Element>(selector: string, root?: puppeteer.JSHandle, handler = 'pierce') => {
-  const {frontend} = getBrowserAndPages();
-  const rootElement = root ? root as puppeteer.ElementHandle : frontend;
+  const rootElement = root ? root as puppeteer.ElementHandle : getBrowserAndPages().frontend;
   const element = await rootElement.$(`${handler}/${selector}`) as puppeteer.ElementHandle<ElementType>;
   return element;
 };
@@ -196,8 +194,7 @@ export const $ =
 // Get multiple element handles. Uses `pierce` handler per default for piercing Shadow DOM.
 export const $$ =
     async<ElementType extends Element = Element>(selector: string, root?: puppeteer.JSHandle, handler = 'pierce') => {
-  const {frontend} = getBrowserAndPages();
-  const rootElement = root ? root.asElement() || frontend : frontend;
+  const rootElement = root?.asElement() || getBrowserAndPages().frontend;
   const elements = await rootElement.$$(`${handler}/${selector}`) as puppeteer.ElementHandle<ElementType>[];
   return elements;
 };

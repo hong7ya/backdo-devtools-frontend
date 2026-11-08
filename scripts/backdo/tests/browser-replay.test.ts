@@ -104,6 +104,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         assert.strictEqual(returned.target.columnNumber, lines[returned.target.lineNumber].length,
             '함수 반환 직후의 토큰 없는 줄 끝 위치를 확인해야 한다');
         await reverseAndVerify(session.page, returned);
+        const insideFunction = await session.page.evaluate(() => window.backdoTest.previous());
+        assert.include(insideFunction.target.url, 'modules-helper.mjs');
+        assert.strictEqual(insideFunction.target.lineNumber, lines.findIndex(line => line.trim() === 'return total;'));
+        assert.isBelow(insideFunction.target.columnNumber, returned.target.columnNumber);
+        await reverseAndVerify(session.page, insideFunction);
         assert.deepEqual(session.pageErrors, []);
 
         async function resumeToHelper(line: number): Promise<void> {
@@ -166,6 +171,27 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       }).timeout(60_000);
     }
   }
+
+  it('실행이 끝난 콘솔 코드의 기록을 다음 입력 뒤에도 유지하고 내부 소스로 돌아간다', async () => {
+    const session = await openSession('page', 'completed-source.js');
+    await clickExecutionButton(session.page, 'Resume script execution');
+    await session.page.waitForSelector('pierce/.console-user-command-result', {visible: true});
+    const completedHistoryLength = await session.page.evaluate(() => window.backdoTest.historyLength());
+    assert.isAbove(completedHistoryLength, 1);
+
+    await enterConsoleCode(session.page, 'debugger;');
+    await session.page.waitForFunction(() => window.backdoTest.isPaused());
+    assert.isAbove(await session.page.evaluate(() => window.backdoTest.historyLength()), completedHistoryLength);
+    for (let remaining = completedHistoryLength; remaining > 1; remaining--) {
+      const previous = await session.page.evaluate(() => window.backdoTest.previous());
+      await reverseAndVerify(session.page, previous);
+      if (previous.target.url === 'https://example.test/completed-source.js') {
+        assert.deepEqual(session.pageErrors, []);
+        return;
+      }
+    }
+    assert.fail('실행이 끝난 사용자 소스 내부의 기록에 도달하지 못했습니다.');
+  }).timeout(60_000);
 
   it('UI에서 추가·삭제한 줄 중단점과 Step over·Resume을 함께 사용할 수 있다', async () => {
     const session = await openSession('page', 'for.js');

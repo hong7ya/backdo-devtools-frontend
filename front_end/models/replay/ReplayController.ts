@@ -331,7 +331,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return;
     }
     if (this.#debuggerModel?.isPaused()) {
-      this.fail(new Error('일시정지 중 콘솔에서 실행한 코드는 복원할 수 없습니다. 새 실행 컨텍스트에서 시작하세요.'));
+      // 일시정지 중 조회·수정은 기존 콘솔에 맡긴다. 수동 변경은 재실행 입력으로 저장하지 않는다.
       return;
     }
     const {expression, useCommandLineAPI, userGesture} = command;

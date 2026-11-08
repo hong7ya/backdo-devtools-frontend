@@ -6,6 +6,7 @@ import {assert} from 'chai';
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import * as path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import puppeteer, {type Browser, type Page} from 'puppeteer-core';
 
 import {defaultChromePath} from '../../../test/conductor/paths.js';
@@ -69,6 +70,28 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   });
 
   for (const kind of ['node', 'page'] as const) {
+    it(`${kind === 'node' ? 'Node 포트 연결' : '기존 콘솔 입력'}에서 정지 중 변수 조회·수정 후에도 거꾸로갈 수 있다`, async () => {
+      const session = await openSession(kind, 'for.js');
+      const previous = await runToReturn(session);
+      assert.strictEqual(await evaluateInConsole(session.page, 'total'), '12');
+      assert.strictEqual(await evaluateInConsole(session.page, 'total += 1'), '13');
+      assert.strictEqual(await evaluateInConsole(session.page, 'total'), '13');
+      assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), previous.length);
+
+      const sourcesTab = await session.page.waitForSelector('pierce/#tab-sources', {visible: true});
+      if (!sourcesTab) {
+        assert.fail('소스 탭을 찾을 수 없습니다.');
+      }
+      await sourcesTab.click();
+      assert.isFalse(await reverseDisabled(session.page));
+      await reverseAndVerify(session.page, previous);
+      assert.strictEqual(await evaluateInConsole(session.page, 'total'), '12',
+          '재실행 결과를 보여 주고 콘솔에서 수동으로 바꾼 값은 다시 적용하지 않아야 한다');
+      await sourcesTab.click();
+      assert.isFalse(await reverseDisabled(session.page));
+      assert.deepEqual(session.pageErrors, []);
+    }).timeout(60_000);
+
     for (const [fixture, description] of [
       ['for.js', 'for 문의 마지막 조건식으로'],
       ['async-await.js', 'async/await 이후의 마지막 조건식으로'],
@@ -442,6 +465,21 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     await prompt.click();
     await page.keyboard.sendCharacter(source);
     await page.keyboard.press('Enter');
+  }
+
+  async function evaluateInConsole(page: Page, expression: string): Promise<string> {
+    const selector = 'pierce/.console-user-command-result';
+    const previousCount = (await page.$$(selector)).length;
+    await enterConsoleCode(page, expression);
+    const deadline = performance.now() + UI_TIMEOUT_MS;
+    while (performance.now() < deadline) {
+      const results = await page.$$(selector);
+      if (results.length > previousCount) {
+        return await results[results.length - 1].evaluate(element => element.textContent?.trim() ?? '');
+      }
+      await delay(20);
+    }
+    assert.fail(`콘솔 실행 결과를 기다리는 시간이 지났습니다: ${expression}`);
   }
 
   async function lineNumberElement(page: Page, lineNumber: number) {

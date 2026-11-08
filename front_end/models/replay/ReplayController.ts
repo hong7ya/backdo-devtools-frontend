@@ -52,7 +52,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   readonly session = new ReplaySession();
   #lastUsageNotification = 0;
   #timing = new ReplayTiming();
-  #entryURL = '';
+  #scriptsPrepared = false;
+  #scriptExecutionBreakpoint: Protocol.Debugger.BreakpointId|null = null;
+  #scriptFilter: (script: SDK.Script.Script) => boolean = () => true;
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
   #prepareTarget: (() => Promise<void>)|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
@@ -109,6 +111,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#prepareTarget = prepare;
   }
 
+  setScriptFilter(filter: (script: SDK.Script.Script) => boolean): void {
+    this.#scriptFilter = filter;
+  }
+
   setCalibrationHandler(measure: ((signal: AbortSignal) => Promise<number>)|null): void {
     this.#calibrationAbort?.abort();
     this.#calibrationAbort = null;
@@ -152,6 +158,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (!this.calibrated) {
       return '최초 정지 후 CDP 응답 시간을 측정하면 사용할 수 있습니다.';
     }
+    if (this.#debuggerModel?.isPaused() && this.session.history.length && !this.session.atRecordedPause) {
+      return '현재 정지 위치는 실행 기록 대상이 아닙니다. Ignore List 설정을 확인해 주세요.';
+    }
     return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' : '기록된 이전 실행 위치가 없습니다.';
   }
 
@@ -165,6 +174,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     Common.EventTarget.removeEventListeners(this.#listeners);
     this.#debuggerModel?.setPauseInterceptor(null);
     this.#debuggerModel?.setExecutionInterceptor(null);
+    this.#debuggerModel?.setScriptExecutionPreparation(null);
   }
 
   setRestartHandler(restart: (() => Promise<string>)|null): void {
@@ -180,16 +190,19 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.#debuggerModel && !this.#isReplaying) {
       this.#releaseRecording();
       this.session.reset();
-      this.#entryURL = '';
     }
     Common.EventTarget.removeEventListeners(this.#listeners);
+    this.#debuggerModel?.setScriptExecutionPreparation(null);
     this.#debuggerModel = model;
+    this.#scriptsPrepared = false;
+    this.#scriptExecutionBreakpoint = null;
     this.#recordingBreakpointIds.clear();
     this.#scripts.clear();
     this.#consoleSources.clear();
     this.#activeConsoleInput = null;
     model.setPauseInterceptor(details => this.#handlePause(details));
     model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
+    model.setScriptExecutionPreparation(script => this.#prepareScriptExecution(script));
     this.#observeTarget(model);
     if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
       this.fail(new Error('브레이크포인트를 활성화한 새 세션에서 기록을 시작하세요.'));
@@ -273,6 +286,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#rejectReplay?.(new Error(this.session.error ?? '재실행 실패'));
     this.#debuggerModel?.setExecutionInterceptor(null);
     this.#debuggerModel?.setPauseInterceptor(null);
+    this.#debuggerModel?.setScriptExecutionPreparation(null);
     this.#releaseRecording();
     Common.Console.Console.instance().error(`BackDo: ${this.session.error}`);
     if (this.#isReplaying) {
@@ -287,7 +301,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (!this.#isReplaying) {
         this.#releaseRecording();
         this.session.reset();
-        this.#entryURL = '';
         model.setPauseInterceptor(details => this.#handlePause(details));
         model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
         this.#notifyStatusChanged();
@@ -466,11 +479,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return recorded;
     }
     let url = await this.#consoleSources.get(script.scriptId);
-    if (!url && this.#consoleInputs.length === 0 && !this.#entryURL && script.sourceURL) {
-      // Node 파일과 웹페이지 스크립트를 같은 방식으로 첫 정지에서 식별한다. 파일 경로나 명령을 요구하지 않는다.
-      this.#entryURL = script.sourceURL;
-    }
-    if (!url && script.sourceURL && script.sourceURL === this.#entryURL) {
+    if (!url && script.sourceURL && this.#scriptFilter(script)) {
       url = script.sourceURL;
     }
     if (!url) {
@@ -479,6 +488,36 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     const result = await this.#installRecordingBreakpoints(script, url);
     this.#scripts.set(script.scriptId, result);
     return result;
+  }
+
+  async #prepareRecordingScripts(): Promise<void> {
+    const model = this.#debuggerModel;
+    if (!model || this.#scriptsPrepared) {
+      return;
+    }
+    this.#scriptsPrepared = true;
+    const response = await model.agent.invoke_setInstrumentationBreakpoint({
+      instrumentation: Protocol.Debugger.SetInstrumentationBreakpointRequestInstrumentation.BeforeScriptExecution,
+    });
+    if (response.getError()) {
+      throw new Error(response.getError());
+    }
+    this.#scriptExecutionBreakpoint = response.breakpointId;
+    // 이미 불러온 모듈은 최초 정지에서, 나중에 불러오는 모듈은 실행 직전에 준비한다.
+    for (const script of model.scripts()) {
+      await this.#recordedScript(script);
+    }
+  }
+
+  async #prepareScriptExecution(script: SDK.Script.Script): Promise<void> {
+    if (this.session.error || !this.#scriptsPrepared) {
+      return;
+    }
+    try {
+      await this.#recordedScript(script);
+    } catch (error) {
+      this.fail(error);
+    }
   }
 
   async #installRecordingBreakpoints(script: SDK.Script.Script, url: string): Promise<RecordedScript> {
@@ -530,7 +569,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       const frame = details.callFrames[0];
       const initial = frame && !this.#scripts.has(frame.script.scriptId);
-      const script = frame && await this.#recordedScript(frame.script);
+      await this.#prepareRecordingScripts();
+      // 시작 정지가 Ignore List의 모듈에 있어도 재시작의 기준점으로만 보관한다.
+      const breakOnStart = String(details.reason) === 'Break on start';
+      let script = frame && await this.#recordedScript(frame.script);
+      if (!script && frame && breakOnStart) {
+        script = {url: frame.script.sourceURL, positions: new Set(), debuggerStatements: new Set()};
+      }
       if (generation !== this.#replayGeneration || this.session.error) {
         return false;
       }
@@ -539,7 +584,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
           await this.#resumeExecution();
           return true;
         }
-        this.session.unrecordedPause();
+        this.session.unrecordedPause(details.callFrames.length);
         this.#notifyStatusChanged();
         return false;
       }
@@ -547,7 +592,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const key = `${lineNumber}:${columnNumber}`;
       const position = {url: script.url, hash: frame.script.hash, lineNumber, columnNumber};
       const hitRecordingBreakpoint = details.breakpointIds.some(id => this.#recordingBreakpointIds.has(id));
-      if (!initial && !hitRecordingBreakpoint && !script.debuggerStatements.has(key)) {
+      // Node의 시작 정지는 일반 중단점이 없는 import 앞에도 오며, --inspect-brk 재시작으로 재현된다.
+      if (!initial && !breakOnStart && !hitRecordingBreakpoint && !script.debuggerStatements.has(key)) {
         // XHR·예외 등은 같은 실행 위치에서 별도의 정지를 보낼 수 있다.
         // 복원 중에는 해제되는 사용자 정지를 실행 방문 횟수에 더하지 않는다.
         if (this.#isReplaying) {
@@ -559,7 +605,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#notifyStatusChanged();
         return false;
       }
-      if (!script.positions.has(key)) {
+      if (!script.positions.has(key) && !breakOnStart) {
         throw new Error('일반 브레이크포인트로 재현할 수 없는 정지 위치입니다.');
       }
       // 기록용 ID만 있는 일반 정지만 숨긴다. XHR·DOM·이벤트·예외·수동 정지는 보존한다.
@@ -601,15 +647,19 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.busy) {
       return true;
     }
-    if (this.session.error || !this.#scripts.size) {
+    if (this.session.error || !this.#scriptsPrepared) {
       return false;
     }
     if (command === 'skip-pauses') {
       this.fail(new Error('모든 정지 건너뛰기로 실행 기록이 끊겼습니다.'));
       return false;
     }
+    const useNativeCommand = this.#debuggerModel?.isPaused() && !this.session.atRecordedPause;
     this.session.beginExecution(command);
     this.#notifyStatusChanged();
+    if (useNativeCommand) {
+      return false;
+    }
     if (command === 'pause') {
       void this.#debuggerModel?.agent.invoke_pause();
     } else {
@@ -638,6 +688,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#scripts.clear();
     this.#activeConsoleInput = null;
     this.#lastPosition = null;
+    this.#scriptsPrepared = false;
+    if (this.#scriptExecutionBreakpoint) {
+      void this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId: this.#scriptExecutionBreakpoint});
+      this.#scriptExecutionBreakpoint = null;
+    }
     for (const breakpointId of this.#recordingBreakpointIds) {
       void this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
     }

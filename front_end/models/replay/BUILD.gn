@@ -25,6 +25,7 @@ devtools_module("replay") {
     "../../core/protocol_client:bundle",
     "../../core/sdk:bundle",
     "../../generated:protocol",
+    "../bindings:bundle",
   ]
 }
 
@@ -65,5 +66,6 @@ ts_library("browser_test_support") {
     "../../core/common:bundle",
     "../../core/sdk:bundle",
     "../../panels/sources:bundle",
+    "../../ui/components/text_editor:bundle",
   ]
 }

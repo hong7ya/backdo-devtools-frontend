@@ -24,6 +24,30 @@ export const setHighlightedPosition = CodeMirror.StateEffect.define<number>();
  */
 export const clearHighlightedPosition = CodeMirror.StateEffect.define<void>();
 
+const positionHighlightedState = CodeMirror.StateField.define<null|number>({
+  create() {
+    return null;
+  },
+
+  update(pos, tr) {
+    if (pos) {
+      pos = tr.changes.mapPos(pos, -1, CodeMirror.MapMode.TrackDel);
+    }
+    for (const effect of tr.effects) {
+      if (effect.is(clearHighlightedPosition)) {
+        pos = null;
+      } else if (effect.is(setHighlightedPosition)) {
+        pos = Math.max(0, Math.min(effect.value, tr.newDoc.length - 1));
+      }
+    }
+    return pos;
+  },
+});
+
+export function getHighlightedPosition(state: CodeMirror.EditorState): null|number {
+  return state.field(positionHighlightedState, false) ?? null;
+}
+
 /**
  * Constructs a CodeMirror extension that can be used to decorate the current execution
  * line (and token), for example when the debugger is paused, with specific CSS classes.
@@ -39,30 +63,6 @@ export function positionHighlighter(
     ): CodeMirror.Extension {
   const executionLine = CodeMirror.Decoration.line({attributes: {class: executionLineClassName}});
   const executionToken = CodeMirror.Decoration.mark({attributes: {class: executionTokenClassName}});
-
-  const positionHighlightedState = CodeMirror.StateField.define<null|number>({
-    create() {
-      return null;
-    },
-
-    update(pos, tr) {
-      if (pos) {
-        pos = tr.changes.mapPos(pos, -1, CodeMirror.MapMode.TrackDel);
-      }
-      for (const effect of tr.effects) {
-        if (effect.is(clearHighlightedPosition)) {
-          pos = null;
-        } else if (effect.is(setHighlightedPosition)) {
-          pos = Math.max(0, Math.min(effect.value, tr.newDoc.length - 1));
-        }
-      }
-      return pos;
-    },
-  });
-
-  function getHighlightedPosition(state: CodeMirror.EditorState): null|number {
-    return state.field(positionHighlightedState);
-  }
 
   class PositionHighlighter {
     tree: CodeMirror.Tree;

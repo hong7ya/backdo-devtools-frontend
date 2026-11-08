@@ -37,6 +37,10 @@ export class ReplaySession {
     return this.#isAtRecordedPause && !this.#failureReason && !this.#replayPlan && this.history.canReverse;
   }
 
+  get atRecordedPause(): boolean {
+    return this.#isAtRecordedPause;
+  }
+
   beginExecution(command: ExecutionCommand): void {
     if (this.#replayPlan || this.#failureReason) {
       throw new Error(this.#failureReason || 'Replay is in progress');
@@ -82,8 +86,9 @@ export class ReplaySession {
   }
 
   /** 기록 대상 파일 밖의 정지에서는 직전 기록을 현재 위치로 간주하지 않는다. */
-  unrecordedPause(): void {
+  unrecordedPause(depth = this.#currentDepth): void {
     this.#isAtRecordedPause = false;
+    this.#currentDepth = depth;
   }
 
   reset(): void {

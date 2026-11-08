@@ -70,6 +70,47 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   });
 
   for (const kind of ['node', 'page'] as const) {
+    for (const fixture of ['modules-static.mjs', 'modules-dynamic.js']) {
+      it(`${kind === 'node' ? 'Node' : 'inspector 웹페이지'}의 ${fixture}에서 모듈을 넘어 거꾸로간다`, async () => {
+        const session = await openSession(kind, fixture, true, 'page');
+        const helper = await readFile(path.join(__dirname, '../fixtures/modules-helper.mjs'), 'utf8');
+        const lines = helper.split('\n');
+        const firstPause = lines.findIndex(line => line.trim() === 'debugger;');
+        const lastPause = lines.map(line => line.trim()).lastIndexOf('debugger;');
+
+        await resumeToHelper(firstPause);
+        const caller = await session.page.evaluate(() => window.backdoTest.previous());
+        assert.notInclude(caller.target.url, 'modules-helper.mjs', '호출한 파일의 위치도 기록되어야 한다');
+        await reverseAndVerify(session.page, caller);
+
+        await resumeToHelper(firstPause);
+        await resumeToHelper(lastPause);
+        const condition = await session.page.evaluate(() => window.backdoTest.previous());
+        verifyFinalCondition('for.js', helper, condition);
+        assert.include(condition.target.url, 'modules-helper.mjs');
+        await reverseAndVerify(session.page, condition);
+
+        await resumeToHelper(lastPause);
+        await clickExecutionButton(session.page, 'Resume script execution');
+        await session.page.waitForFunction(url => window.backdoTest.isPaused() &&
+            window.backdoTest.snapshot().position?.url === url, {}, caller.target.url);
+        const returned = await session.page.evaluate(() => window.backdoTest.previous());
+        assert.include(returned.target.url, 'modules-helper.mjs');
+        assert.strictEqual(returned.target.columnNumber, lines[returned.target.lineNumber].length,
+            '함수 반환 직후의 토큰 없는 줄 끝 위치를 확인해야 한다');
+        await reverseAndVerify(session.page, returned);
+        assert.deepEqual(session.pageErrors, []);
+
+        async function resumeToHelper(line: number): Promise<void> {
+          await clickExecutionButton(session.page, 'Resume script execution');
+          await session.page.waitForFunction(expected => window.backdoTest.snapshot().error ||
+              window.backdoTest.isPausedAtLine(expected) &&
+              window.backdoTest.snapshot().position?.url.endsWith('modules-helper.mjs'), {}, line);
+          assert.isNull((await session.page.evaluate(() => window.backdoTest.snapshot())).error);
+        }
+      }).timeout(60_000);
+    }
+
     it(`${kind === 'node' ? 'Node 포트 연결' : '기존 콘솔 입력'}에서 정지 중 변수 조회·수정 후에도 거꾸로갈 수 있다`, async () => {
       const session = await openSession(kind, 'for.js');
       const previous = await runToReturn(session);
@@ -340,7 +381,13 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         `process.getBuiltinModule('fs').appendFileSync(process.argv[2], '진입\\n');\n${nodeCode}`;
     const entry = path.join(temporaryDirectory, fixture);
     await writeFile(entry, source);
-    server = await serveTestFrontend(source);
+    const modules: Record<string, string> = {};
+    if (fixture.startsWith('modules-')) {
+      const helper = await readFile(path.join(__dirname, '../fixtures/modules-helper.mjs'), 'utf8');
+      await writeFile(path.join(temporaryDirectory, 'modules-helper.mjs'), helper);
+      modules['/modules-helper.mjs'] = helper;
+    }
+    server = await serveTestFrontend(source, modules);
     const serverDirectory = process.env.BACKDO_SERVER_DIR || path.resolve(process.cwd(), '../server');
     const {startServer} = require(path.join(serverDirectory, 'app.js'));
     application = await startServer({port: 0});

@@ -6,6 +6,7 @@ import type {BrowserTestClient, HistorySnapshot, ReplaySnapshot} from '../../../
 import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Sources from '../../panels/sources/sources.js';
+import * as TextEditor from '../../ui/components/text_editor/text_editor.js';
 
 import {ReplayController} from './ReplayController.js';
 
@@ -86,11 +87,14 @@ class ReplayTestHarness implements BrowserTestClient {
 
   #highlightedPosition(): number[]|null {
     const editor = Sources.SourcesPanel.SourcesPanel.instance().sourcesViewInternal.currentSourceFrame()?.textEditor;
-    const token = editor?.shadowRoot?.querySelector('.cm-executionToken');
-    if (!editor || !token) {
+    const marker = editor?.shadowRoot?.querySelector('.cm-executionLine');
+    if (!editor || !marker) {
       return null;
     }
-    const offset = editor.editor.posAtDOM(token, 0);
+    const offset = TextEditor.ExecutionPositionHighlighter.getHighlightedPosition(editor.state);
+    if (offset === null) {
+      return null;
+    }
     const line = editor.state.doc.lineAt(offset);
     return [line.number - 1, offset - line.from];
   }

@@ -180,7 +180,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isNull(controller.session.error);
   });
 
-  for (const kind of ['node', 'page'] as const) {
+  for (const kind of ['node', 'console'] as const) {
     it(`${kind === 'node' ? 'Node' : '콘솔'}에서 과거 사용자 소스의 조회 실패도 원인과 함께 알린다`, async () => {
       const prepared = prepare(kind);
       const {controller, model, script, target, expression} = prepared;
@@ -191,7 +191,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub)
           .withArgs(sinon.match({start: sinon.match({scriptId: expired.scriptId})}))
           .resolves({getError: () => 'Script not found'});
-      if (kind === 'page') {
+      if (kind === 'console') {
         recordConsoleCommand(target, expression);
         model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
       }
@@ -311,7 +311,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('콘솔에서 입력한 익명 소스에 파일 경로 없이 일반 브레이크포인트를 설치한다', async () => {
-    const {controller, model, script, target, expression} = prepare('page');
+    const {controller, model, script, target, expression} = prepare('console');
     recordConsoleCommand(target, expression);
     model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
     await pause(model, script, 0);
@@ -355,7 +355,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('콘솔 원문 용량 한도에 도달하면 원문과 위치를 함께 해제한다', () => {
-    const {controller, target} = prepare('page');
+    const {controller, target} = prepare('console');
     recordConsoleCommand(target, 'const first = 1;');
     assert.strictEqual(controller.inputCount, 1);
     recordConsoleCommand(target, 'x'.repeat(Replay.ReplayLimits.REPLAY_LIMITS.consoleBytes / 2 + 1));
@@ -430,7 +430,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('실행 컨텍스트가 교체되면 이전 입력과 위치를 비우고 새 기록을 받는다', () => {
-    const {controller, target, model} = prepare('page');
+    const {controller, target, model} = prepare('console');
     recordConsoleCommand(target, 'const first = 1;');
     model.globalObjectCleared();
     assert.strictEqual(controller.inputCount, 0);

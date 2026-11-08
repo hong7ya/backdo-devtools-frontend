@@ -6,10 +6,23 @@ import {describeWithEnvironment} from '../../testing/EnvironmentHelpers.js';
 
 import * as Replay from './replay.js';
 
-describeWithEnvironment('브라우저와 Node의 공통 연결', () => {
+describeWithEnvironment('Console과 Node의 공통 연결', () => {
+  it('기존 inspector 화면에서는 재실행 서버와 연결을 시작하지 않는다', async () => {
+    const connection = new Replay.ReplayConnection.ReplayConnection(new Replay.ReplayController.ReplayController());
+    const fetch = sinon.stub(window, 'fetch').rejects();
+    const onTargetCreated = sinon.spy();
+    const connected = await connection.initialize({
+      kind: 'console', name: 'main', onTargetCreated, onConnectionLost: sinon.spy(),
+    }, new URL('http://backdo.test/gen/front_end/inspector.html?ws=127.0.0.1:9222/id'));
+
+    assert.isFalse(connected);
+    sinon.assert.notCalled(fetch);
+    sinon.assert.notCalled(onTargetCreated);
+  });
+
   it('기존 ws 주소는 추가 조회나 재시작 연동 없이 사용한다', async () => {
     const connection = new Replay.ReplayConnection.ReplayConnection(new Replay.ReplayController.ReplayController());
-    for (const kind of ['node', 'page'] as const) {
+    for (const kind of ['node', 'console'] as const) {
       assert.strictEqual(await connection.resolve({ws: 'ws://127.0.0.1:9229/id'}, kind), 'ws://127.0.0.1:9229/id');
     }
   });

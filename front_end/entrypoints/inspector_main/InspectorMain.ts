@@ -59,7 +59,7 @@ export class InspectorMainImpl implements Common.Runnable.Runnable {
   }
 
   async run(): Promise<void> {
-    const type = Root.Runtime.Runtime.queryParam('v8only') ? 'node' : 'page';
+    const type = Root.Runtime.Runtime.queryParam('v8only') ? 'node' : 'console';
     const connected = !Root.Runtime.Runtime.queryParam('targetType') &&
         await Replay.ReplayConnection.ReplayConnection.instance().initialize({
           kind: type,

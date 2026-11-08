@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import type * as Platform from '../../core/platform/platform.js';
+import * as SDK from '../../core/sdk/sdk.js';
 import type * as Protocol from '../../generated/protocol.js';
 
 import {validateWebSocketURL} from './ReplayEndpoint.js';
@@ -47,7 +49,6 @@ export async function measureRoundTrip(
     });
     process = await untilCancelled(pendingProcess, cancellation.signal);
     connection = new CalibrationConnection(validateWebSocketURL(process.ws), cancellation.signal);
-    await connection.ready;
     await connection.request('Runtime.enable');
     await connection.request('Debugger.enable');
     const script = await connection.request<Protocol.Runtime.CompileScriptResponse>('Runtime.compileScript', {
@@ -101,49 +102,20 @@ async function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal): Prom
 
 /** 측정 전용 순차 요청 연결. 정지 이벤트를 SDK나 사용자 화면에 전달하지 않는다. */
 class CalibrationConnection {
-  readonly ready: Promise<void>;
-  readonly #socket: WebSocket;
+  readonly #connection: SDK.Connections.WebSocketConnection;
   readonly #signal: AbortSignal;
   #nextId = 0;
   #pending: {id: number, resolve: (value: object) => void, reject: (error: Error) => void}|null = null;
   #failure: Error|null = null;
-  #rejectReady: (error: Error) => void = () => {};
   readonly #cancel = (): void => this.#stop(new Error('CDP 측정 연결이 취소되었습니다.'));
 
   constructor(ws: string, signal: AbortSignal) {
     this.#signal = signal;
-    this.#socket = new WebSocket(ws);
-    this.ready = new Promise<void>((resolve, reject) => {
-      this.#rejectReady = reject;
-      this.#socket.onopen = () => resolve();
-      this.#socket.onerror = () => {
-        const error = new Error('더미 프로세스의 CDP 연결에 실패했습니다.');
-        reject(error);
-        this.#stop(error);
-      };
-      this.#socket.onclose = () => {
-        const error = new Error('더미 프로세스의 CDP 연결이 종료되었습니다.');
-        reject(error);
-        this.#stop(error);
-      };
-    });
-    this.#socket.onmessage = event => {
-      try {
-        const message = JSON.parse(String(event.data)) as {id?: number, result?: object, error?: {message: string}};
-        if (message.id !== this.#pending?.id) {
-          return;
-        }
-        const pending = this.#pending;
-        this.#pending = null;
-        if (message.error) {
-          pending?.reject(new Error(message.error.message));
-        } else {
-          pending?.resolve(message.result ?? {});
-        }
-      } catch {
-        this.#stop(new Error('더미 프로세스의 CDP 응답을 읽지 못했습니다.'));
-      }
-    };
+    // SDK의 연결 전 송신 대기·실패·종료 처리를 재사용한다. 전역 대상이나 연결 팩토리는 등록하지 않는다.
+    this.#connection = new SDK.Connections.WebSocketConnection(
+        ws as Platform.DevToolsPath.UrlString, message => this.#stop(new Error(message)));
+    this.#connection.setOnDisconnect(message => this.#stop(new Error(message)));
+    this.#connection.setOnMessage(message => this.#handleMessage(message));
     signal.addEventListener('abort', this.#cancel, {once: true});
     if (signal.aborted) {
       this.#cancel();
@@ -160,7 +132,7 @@ class CalibrationConnection {
     return await new Promise<T>((resolve, reject) => {
       const id = ++this.#nextId;
       this.#pending = {id, resolve: value => resolve(value as T), reject};
-      this.#socket.send(JSON.stringify({id, method, params}));
+      this.#connection.sendRawMessage(JSON.stringify({id, method, params}));
     });
   }
 
@@ -168,16 +140,33 @@ class CalibrationConnection {
     this.#stop(new Error('CDP 측정 연결을 정리했습니다.'));
   }
 
+  #handleMessage(data: object|string): void {
+    try {
+      const message = (typeof data === 'string' ? JSON.parse(data) : data) as
+          {id?: number, result?: object, error?: {message: string}};
+      const pending = this.#pending;
+      if (!pending || message.id !== pending.id) {
+        return;
+      }
+      this.#pending = null;
+      if (message.error) {
+        pending.reject(new Error(message.error.message));
+      } else {
+        pending.resolve(message.result ?? {});
+      }
+    } catch {
+      this.#stop(new Error('더미 프로세스의 CDP 응답을 읽지 못했습니다.'));
+    }
+  }
+
   #stop(error: Error): void {
-    this.#failure ??= error;
-    this.#rejectReady(error);
+    if (this.#failure) {
+      return;
+    }
+    this.#failure = error;
     this.#pending?.reject(error);
     this.#pending = null;
     this.#signal.removeEventListener('abort', this.#cancel);
-    this.#socket.onopen = null;
-    this.#socket.onclose = null;
-    this.#socket.onerror = null;
-    this.#socket.onmessage = null;
-    this.#socket.close();
+    void this.#connection.disconnect();
   }
 }

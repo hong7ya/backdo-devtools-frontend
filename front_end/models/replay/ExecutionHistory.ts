@@ -93,6 +93,10 @@ export class ExecutionHistory {
     return new ReplayPlan(this.#positions.slice(0, -1));
   }
 
+  initial(): ReplayPlan {
+    return new ReplayPlan(this.#positions.slice(0, 1));
+  }
+
   commit(plan: ReplayPlan): void {
     if (!plan.complete) {
       throw new Error('Cannot commit an incomplete replay');

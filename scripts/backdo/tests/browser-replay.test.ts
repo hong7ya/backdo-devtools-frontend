@@ -26,6 +26,7 @@ interface TestSession {
   source: string;
   entry: string;
   documentRequests: () => number;
+  restartCount: () => number;
   pageErrors: string[];
 }
 
@@ -69,6 +70,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         const next = await session.page.evaluate(() => window.backdoTest.previous());
         await reverseAndVerify(session.page, next);
 
+        assert.strictEqual(session.restartCount(), 3, '최초 측정 한 번과 뒤로가기 두 번만 재시작해야 한다');
         assert.strictEqual(session.documentRequests(), 1, '문서 전체를 다시 불러오지 않아야 한다');
         assert.deepEqual(session.pageErrors, [], '브라우저에서 처리되지 않은 오류가 없어야 한다');
       }).timeout(60_000);
@@ -107,9 +109,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   it('예측하지 못한 긴 복원에서도 로딩·패널 이동을 유지하고 이후 기록은 종료한다', async () => {
     let releaseRestart: (() => void)|undefined;
     const gate = new Promise<void>(resolve => { releaseRestart = resolve; });
-    beforeRestart = () => gate;
     const session = await openSession('node', 'for.js');
     const previous = await runToReturn(session);
+    beforeRestart = () => gate;
     try {
       await clickReverse(session.page);
       const loading = await session.page.waitForSelector(LOADING, {visible: true});
@@ -143,6 +145,30 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), 0);
     assert.isNull(await session.page.$(LOADING));
     assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
+  it('최초 복원 측정이 3초를 넘으면 같은 위치에 도착한 뒤 기록을 종료한다', async () => {
+    beforeRestart = async () => await new Promise(resolve => setTimeout(resolve, 3100));
+    const session = await openSession('node', 'for.js');
+    const snapshot = await session.page.evaluate(() => window.backdoTest.snapshot());
+    assert.include(snapshot.error ?? '', '예상 복원 시간이 3초');
+    assert.strictEqual(session.restartCount(), 1);
+    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), 0);
+    assert.isTrue(await reverseDisabled(session.page));
+    assert.isNull(await session.page.$(LOADING));
+    await session.page.waitForSelector('pierce/[aria-label="Resume script execution"]', {visible: true});
+  }).timeout(60_000);
+
+  it('최초 측정의 재시작이 실패하면 재시도를 반복하지 않고 이유를 표시한다', async () => {
+    beforeRestart = async () => {
+      throw new Error('테스트 대상의 재시작 실패');
+    };
+    const session = await openSession('node', 'for.js');
+    assert.strictEqual(session.restartCount(), 1);
+    const button = await session.page.$(REVERSE_BUTTON);
+    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '재시작 실패');
+    assert.isTrue(await reverseDisabled(session.page));
+    assert.isNull(await session.page.$(LOADING));
   }).timeout(60_000);
 
   it('소스가 바뀌면 복원을 실패 처리하고 뒤로가기 버튼을 비활성화한다', async () => {
@@ -184,6 +210,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     server = await serveTestFrontend(source);
     target = kind === 'node' ? new NodeTestTarget({entry, output: null}) : new BrowserTestTarget(server.origin);
     await target.start();
+    const initialTarget = {...target.session};
     browser = await puppeteer.launch({
       executablePath: process.env.CHROME_BIN || defaultChromePath(),
       headless: true, defaultViewport: {width: 1440, height: 1000},
@@ -199,9 +226,18 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     });
     page.on('pageerror', error => pageErrors.push(error.message));
     let connectedWS = target.session.ws;
+    let restartCount = 0;
+    const calibration: {position: HistorySnapshot['target']|null} = {position: null};
     await page.exposeFunction('restartBackDoTestTarget', async (address: {ws: string, kind: string}) => {
       assert.strictEqual(address.kind, kind);
       assert.strictEqual(address.ws, connectedWS);
+      restartCount++;
+      if (restartCount === 1) {
+        calibration.position = (await page.evaluate(() => window.backdoTest.snapshot())).position;
+        const loading = await page.waitForSelector(LOADING, {visible: true});
+        assert.include(await loading?.evaluate(element => element.textContent), '측정 중');
+        assert.isTrue(await reverseDisabled(page));
+      }
       await beforeRestart?.();
       connectedWS = (await currentTarget().restart()).ws;
       return connectedWS;
@@ -230,9 +266,33 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         await enterConsoleCode(page, source);
       }
     }
-    await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
+    if (withRestart) {
+      await page.waitForFunction(() => window.backdoTest.calibrationFinished(), {timeout: UI_TIMEOUT_MS});
+      const snapshot = await page.evaluate(() => window.backdoTest.snapshot());
+      if (!snapshot.error) {
+        assert.isTrue(snapshot.calibrated);
+        assert.isAbove(snapshot.estimatedReplayMs ?? 0, 0);
+        assert.strictEqual(restartCount, 1);
+        assert.strictEqual(await page.evaluate(() => window.backdoTest.historyLength()), 1);
+        const initialPosition = calibration.position;
+        if (!initialPosition) {
+          assert.fail('측정 전 최초 정지 위치를 확인할 수 있어야 한다');
+        }
+        assert.deepEqual(snapshot.position, initialPosition, '측정 후 최초 정지 위치를 유지해야 한다');
+        assert.deepEqual(snapshot.highlight, [initialPosition.lineNumber, initialPosition.columnNumber]);
+        assert.notStrictEqual(currentTarget().session.pid, initialTarget.pid);
+        assert.notStrictEqual(currentTarget().session.ws, initialTarget.ws);
+        assert.strictEqual(currentTarget().session.port, initialTarget.port);
+        assert.isTrue(snapshot.sameDocument);
+        assert.isNull(await page.$(LOADING));
+      }
+    } else {
+      await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
+      assert.strictEqual(restartCount, 0);
+      assert.isFalse((await page.evaluate(() => window.backdoTest.snapshot())).calibrated);
+    }
     assert.isTrue(await reverseDisabled(page));
-    return {page, source, entry, documentRequests: () => documentRequests, pageErrors};
+    return {page, source, entry, documentRequests: () => documentRequests, restartCount: () => restartCount, pageErrors};
   }
 
   async function enterConsoleCode(page: Page, source: string): Promise<void> {

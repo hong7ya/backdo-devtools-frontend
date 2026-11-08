@@ -17,6 +17,8 @@ export interface HistorySnapshot {
 
 export interface ReplaySnapshot {
   error: string|null;
+  calibrated: boolean;
+  estimatedReplayMs: number|null;
   position: RecordedPosition|null;
   highlight: number[]|null;
   messages: string[];
@@ -32,6 +34,7 @@ export interface ReplaySnapshot {
 export interface BrowserTestClient {
   useTestLifecycle(): void;
   ready(): boolean;
+  calibrationFinished(): boolean;
   historyLength(): number;
   isPaused(): boolean;
   isPausedAtLine(lineNumber: number): boolean;

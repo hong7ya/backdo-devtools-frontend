@@ -37,6 +37,19 @@ export class ReplaySession {
     return this.#isAtRecordedPause && !this.#failureReason && !this.#replayPlan && this.history.canReverse;
   }
 
+  get canCalibrate(): boolean {
+    return this.#isAtRecordedPause && !this.#failureReason && !this.#replayPlan && this.history.length === 1;
+  }
+
+  beginCalibration(): ExecutionPosition {
+    if (!this.canCalibrate) {
+      throw new Error('최초 정지 위치에서만 복원 시간을 측정할 수 있습니다.');
+    }
+    this.#replayPlan = this.history.initial();
+    this.#isAtRecordedPause = false;
+    return this.#replayPlan.target;
+  }
+
   beginExecution(command: ExecutionCommand): void {
     if (this.#replayPlan || this.#failureReason) {
       throw new Error(this.#failureReason || 'Replay is in progress');

@@ -15,6 +15,7 @@ devtools_module("replay") {
     "ReplayEndpoint.ts",
     "ReplayLimits.ts",
     "ReplaySession.ts",
+    "ReplayTiming.ts",
   ]
   deps = [
     "../../core/common:bundle",
@@ -44,6 +45,7 @@ ts_library("unittests") {
     "ReplayController.test.ts",
     "ReplayEndpoint.test.ts",
     "ReplaySession.test.ts",
+    "ReplayTiming.test.ts",
   ]
   deps = [
     ":bundle",

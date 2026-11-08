@@ -79,6 +79,29 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.lengthOf(controller.session.history, 0);
   });
 
+  it('사용자 대기는 기록을 유지하고 예상 복원이 3초에 도달하면 기록 전체를 종료한다', async () => {
+    const clock = sinon.useFakeTimers();
+    try {
+      const {controller, model, script} = prepare('node');
+      sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+      await pause(model, script, 0);
+      await clock.tickAsync(60_000);
+      assert.isNull(controller.session.error);
+      assert.lengthOf(controller.session.history, 1);
+
+      await model.resume();
+      await clock.tickAsync(1600);
+      await pause(model, script, 1);
+      assert.include(controller.session.error ?? '', '예상 복원 시간이 3초');
+      assert.isFalse(controller.canReverse(model));
+      assert.lengthOf(controller.session.history, 0);
+      assert.strictEqual(controller.recordingUsage.breakpoints, 0);
+      assert.isNull(controller.estimatedReplayMs);
+    } finally {
+      clock.restore();
+    }
+  });
+
   it('실행 컨텍스트가 교체되면 이전 입력과 위치를 비우고 새 기록을 받는다', () => {
     const {controller, target, model} = prepare('page');
     recordConsoleCommand(target, 'const first = 1;');

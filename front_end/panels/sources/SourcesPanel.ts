@@ -751,7 +751,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
 
   private updateReplayUsage(): void {
     const replay = Replay.ReplayController.ReplayController.instance();
-    this.#replayToolbar?.updateUsage(replay.recordingUsage, replay.session.error);
+    this.#replayToolbar?.updateUsage(replay.recordingUsage, replay.session.error, replay.estimatedReplayMs);
   }
 
   private updateDebuggerButtonsAndStatusForTest(): void {
@@ -885,20 +885,26 @@ export class SourcesPanel extends UI.Panel.Panel implements
     if (this.#reverseTransition || !replay.canReverse(target?.model(SDK.DebuggerModel.DebuggerModel) ?? null)) {
       return;
     }
+    const startedAt = performance.now();
     const editor = this.sourcesViewInternal.currentSourceFrame()?.textEditor.editor;
     const scroll = editor ? {top: editor.scrollDOM.scrollTop, left: editor.scrollDOM.scrollLeft} : null;
     this.#reverseTransition = true;
     this.#reverseTransitionAbort = new AbortController();
+    let restored = false;
     void this.updateDebuggerButtonsAndStatus();
     try {
       await withReplayTransition(this.element, this.#reverseTransitionAbort.signal, async () => {
         await replay.reverse();
+        restored = true;
         await this.callFrameChanged();
         await this.waitForReplayHighlight(scroll);
       });
     } catch (error) {
       Common.Console.Console.instance().error(`BackDo: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      if (restored) {
+        replay.recordReplayDuration(performance.now() - startedAt);
+      }
       this.#reverseTransition = false;
       this.#reverseTransitionAbort = undefined;
       void this.updateDebuggerButtonsAndStatus();

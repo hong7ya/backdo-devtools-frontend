@@ -8,5 +8,6 @@ import * as ReplayController from './ReplayController.js';
 import * as ReplayEndpoint from './ReplayEndpoint.js';
 import * as ReplayLimits from './ReplayLimits.js';
 import * as ReplaySession from './ReplaySession.js';
+import * as ReplayTiming from './ReplayTiming.js';
 
-export {ExecutionHistory, ReplayConnection, ReplayController, ReplayEndpoint, ReplayLimits, ReplaySession};
+export {ExecutionHistory, ReplayConnection, ReplayController, ReplayEndpoint, ReplayLimits, ReplaySession, ReplayTiming};

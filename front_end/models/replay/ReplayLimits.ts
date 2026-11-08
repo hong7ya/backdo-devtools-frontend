@@ -9,5 +9,8 @@ export const REPLAY_LIMITS = Object.freeze({
   consoleBytes: 4 * 1024 * 1024,
   breakpoints: 20_000,
   pendingSources: 256,
-  idleMilliseconds: 30 * 60 * 1000,
 });
+
+export const RECORDING_LIMIT_MESSAGE =
+    '실행 기록 한도에 도달해 뒤로가기를 사용할 수 없습니다. 뒤로가기가 필요하면 디버깅 세션을 다시 시작하고, ' +
+    '가능하면 실행 범위를 줄여 원하는 위치까지 이동해 주세요.';

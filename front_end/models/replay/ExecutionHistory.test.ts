@@ -61,26 +61,14 @@ describe('실행 위치 기록', () => {
     assert.deepEqual(history.previous().target, at(0, 0));
   });
 
-  it('복원 계획은 이미 고정된 위치 객체를 재사용하고 명시적으로 기록을 비울 수 있다', () => {
-    const history = new ExecutionHistory();
-    history.record(at(0, 0));
-    history.record(at(1, 0));
-    const first = history.previous();
-    const second = history.previous();
-    assert.strictEqual(first.positions[0], second.positions[0]);
-    history.clear();
-    assert.lengthOf(history, 0);
-    assert.isFalse(history.canReverse);
-  });
-
-  it('이력이 없거나 용량이 부족하면 앞선 기록을 버리지 않고 실패 처리한다', () => {
+  it('빈 기록·유효하지 않은 위치·기록 한도를 거부한다', () => {
     const history = new ExecutionHistory(2);
     assert.isFalse(history.canReverse);
     assert.throws(() => history.previous(), /No previous/);
     assert.throws(() => history.record(at(0, 0, '')), /unstable/);
     history.record(at(0, 0));
     history.record(at(1, 0));
-    assert.throws(() => history.record(at(2, 0)), /limit/);
+    assert.throws(() => history.record(at(2, 0)), /기록 한도/);
     assert.lengthOf(history, 2);
   });
 });

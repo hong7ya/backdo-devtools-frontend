@@ -8,7 +8,16 @@ import("../../../scripts/build/typescript/typescript.gni")
 import("../visibility.gni")
 
 devtools_module("replay") {
-  sources = [ "ExecutionHistory.ts" ]
+  sources = [
+    "ExecutionHistory.ts",
+    "ReplayController.ts",
+    "ReplaySession.ts",
+  ]
+  deps = [
+    "../../core/common:bundle",
+    "../../core/sdk:bundle",
+    "../../generated:protocol",
+  ]
 }
 
 devtools_entrypoint("bundle") {
@@ -24,6 +33,9 @@ devtools_entrypoint("bundle") {
 
 ts_library("unittests") {
   testonly = true
-  sources = [ "ExecutionHistory.test.ts" ]
+  sources = [
+    "ExecutionHistory.test.ts",
+    "ReplaySession.test.ts",
+  ]
   deps = [ ":bundle" ]
 }

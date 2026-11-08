@@ -3,5 +3,7 @@
 // found in the LICENSE file.
 
 import * as ExecutionHistory from './ExecutionHistory.js';
+import * as ReplayController from './ReplayController.js';
+import * as ReplaySession from './ReplaySession.js';
 
-export {ExecutionHistory};
+export {ExecutionHistory, ReplayController, ReplaySession};

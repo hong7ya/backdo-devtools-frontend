@@ -13,6 +13,7 @@ import {type ConnectionRequest, readConnectionRequest, replaceConnectionAddress,
 export interface TargetAddress {
   ws: string;
   kind: TargetKind;
+  pageURL?: string;
 }
 
 /** 별도 서버의 API를 가정하지 않는다. 후속 연동은 이 두 동작을 제공하면 된다. */
@@ -33,6 +34,8 @@ export class ReplayConnection {
   static #instance: ReplayConnection;
   #lifecycle: TargetLifecycle|null = null;
   #address: TargetAddress|null = null;
+  #target: SDK.Target.Target|null = null;
+  #pageURLToRestore = '';
   readonly #controller: ReplayController;
 
   constructor(controller = ReplayController.instance()) {
@@ -57,7 +60,7 @@ export class ReplayConnection {
       }
       const ws = await this.resolve(request, options.kind);
       const connect = (address: string): Promise<void> => this.#connectTarget(address, options);
-      this.#controller.configure(options.kind, connect);
+      this.#controller.configure(connect);
       await SDK.Connections.initMainConnection(() => connect(ws), options.onConnectionLost);
     } catch (error) {
       Common.Console.Console.instance().error(`BackDo 연결: ${error instanceof Error ? error.message : String(error)}`);
@@ -81,6 +84,7 @@ export class ReplayConnection {
     const manager = SDK.TargetManager.TargetManager.instance();
     const type = options.kind === 'node' ? SDK.Target.Type.NODE : SDK.Target.Type.FRAME;
     const target = manager.createTarget('main', options.name, type, null);
+    this.#target = target;
     manager.setScopeTarget(target);
     options.onTargetCreated(target);
     this.#controller.attach(target);
@@ -90,6 +94,12 @@ export class ReplayConnection {
     }
     this.#address = {ws: address, kind: options.kind};
     replaceConnectionAddress(address);
+    if (options.kind === 'page' && this.#pageURLToRestore && this.#pageURLToRestore !== 'about:blank') {
+      const navigation = await target.pageAgent().invoke_navigate({url: this.#pageURLToRestore});
+      if (navigation.getError() || navigation.errorText) {
+        throw new Error(navigation.getError() || navigation.errorText);
+      }
+    }
   }
 
   async #discoverTarget(port: number, kind: TargetKind): Promise<string> {
@@ -103,6 +113,11 @@ export class ReplayConnection {
     if (!this.#lifecycle || !this.#address) {
       throw new Error('대상 프로세스 재시작 연동이 없습니다.');
     }
-    return validateWebSocketURL(await this.#lifecycle.restart({...this.#address}));
+    const target = {...this.#address};
+    if (target.kind === 'page') {
+      this.#pageURLToRestore = this.#target?.inspectedURL() ?? '';
+      target.pageURL = this.#pageURLToRestore;
+    }
+    return validateWebSocketURL(await this.#lifecycle.restart(target));
   }
 }

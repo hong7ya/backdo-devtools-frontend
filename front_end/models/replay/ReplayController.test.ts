@@ -56,7 +56,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     recordConsoleCommand(target, 'const first = 1;');
     assert.strictEqual(controller.inputCount, 1);
     recordConsoleCommand(target, 'x'.repeat(Replay.ReplayLimits.REPLAY_LIMITS.consoleBytes / 2 + 1));
-    assert.include(controller.session.error ?? '', '콘솔 입력 기록 한도');
+    assert.include(controller.status, '실행 기록 한도');
+    assert.include(controller.status, '세션을 다시 시작');
     assert.strictEqual(controller.inputCount, 0);
     assert.lengthOf(controller.session.history, 0);
   });
@@ -72,39 +73,28 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.strictEqual(controller.inputCount, 1);
   });
 
-  it('새 입력이 있으면 보관 시간을 연장하고 마지막 활동 30분 뒤에 해제한다', async () => {
-    const clock = sinon.useFakeTimers();
-    const {controller, target} = prepare('page');
-    try {
-      recordConsoleCommand(target, 'const first = 1;');
-      await clock.tickAsync(29 * 60 * 1000);
-      recordConsoleCommand(target, 'const second = 2;');
-      await clock.tickAsync(2 * 60 * 1000);
-      assert.strictEqual(controller.inputCount, 2);
-      assert.isNull(controller.session.error);
-      await clock.tickAsync(28 * 60 * 1000);
-      assert.strictEqual(controller.inputCount, 0);
-      assert.include(controller.session.error ?? '', '30분');
-    } finally {
-      controller.dispose();
-      clock.restore();
-    }
-  });
-
-  it('새 연결이 응답하지 않아도 제한 시간이 지나면 작업 중 상태를 해제한다', async () => {
+  it('진행 중인 복원은 유지하고 진행이 멈춘 경우에만 대기를 종료한다', async () => {
     const clock = sinon.useFakeTimers();
     let finishConnect: (() => void)|undefined;
     try {
       const {controller, model, script, target} = prepare('node');
-      controller.configure('node', () => new Promise<void>(resolve => {
+      controller.configure(() => new Promise<void>(resolve => {
         finishConnect = resolve;
       }));
       controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
       sinon.stub(target.router()!.connection(), 'disconnect').resolves();
       await pause(model, script, 0);
       await pause(model, script, 1);
+      await pause(model, script, 0);
+      await pause(model, script, 1);
+      sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
       const result = controller.reverse().then(() => null, error => error);
-      await clock.tickAsync(30_001);
+      await clock.tickAsync(20_000);
+      await pause(model, script, 0);
+      await clock.tickAsync(20_000);
+      assert.isTrue(controller.busy);
+      assert.isNull(controller.session.error);
+      await clock.tickAsync(10_001);
       assert.include((await result).message, '제한 시간');
       assert.isFalse(controller.busy);
       assert.isFalse(controller.canReverse(model));
@@ -119,7 +109,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
 function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
   const controller = new Replay.ReplayController.ReplayController();
   controllers.add(controller);
-  controller.configure(kind, async () => {});
+  controller.configure(async () => {});
   const target = createTarget();
   const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
   const scriptId = 'script' as Protocol.Runtime.ScriptId;

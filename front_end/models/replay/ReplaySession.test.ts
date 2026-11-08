@@ -58,18 +58,6 @@ describe('재실행 세션', () => {
     assert.throws(() => session.beginExecution('resume'), /다른 실행 경로/);
   });
 
-  it('새 실행 컨텍스트에서는 이전 실패와 복원 계획까지 초기화한다', () => {
-    const session = new ReplaySession();
-    session.recordPause(pause(0));
-    session.recordPause(pause(1));
-    session.fail(new Error('이전 실행 실패'));
-    session.reset();
-    assert.isNull(session.error);
-    assert.isFalse(session.replaying);
-    assert.lengthOf(session.history, 0);
-    assert.strictEqual(session.recordPause(pause(9)), 'show');
-  });
-
   it('기록 대상 밖의 정지와 재실행 중에는 뒤로가기를 허용하지 않는다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0));

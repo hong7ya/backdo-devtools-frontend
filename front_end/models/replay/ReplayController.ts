@@ -7,11 +7,10 @@ import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
 import type {ExecutionPosition} from './ExecutionHistory.js';
-import type {TargetKind} from './ReplayEndpoint.js';
-import {REPLAY_LIMITS} from './ReplayLimits.js';
+import {RECORDING_LIMIT_MESSAGE, REPLAY_LIMITS} from './ReplayLimits.js';
 import {ReplaySession} from './ReplaySession.js';
 
-const REPLAY_TIMEOUT_MS = 30_000;
+const REPLAY_STALL_TIMEOUT_MS = 30_000;
 
 interface ConsoleInput {
   expression: string;
@@ -38,7 +37,6 @@ interface EventTypes {
 export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTypes> {
   static #instance: ReplayController;
   readonly session = new ReplaySession();
-  #kind: TargetKind = 'page';
   #entryURL = '';
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
@@ -49,8 +47,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #consoleSources = new Map<string, Promise<string|null>>();
   #consoleInputs: ConsoleInput[] = [];
   #consoleBytes = 0;
-  #idleTimer: ReturnType<typeof setTimeout>|undefined;
-  #lastActivityAt = 0;
   #activeConsoleInput: number|null = null;
   #replayGeneration = 0;
   #replayInputCount = 0;
@@ -60,6 +56,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #isReplaying = false;
   #resolveReplay: (() => void)|null = null;
   #rejectReplay: ((error: Error) => void)|null = null;
+  #refreshReplayTimeout: (() => void)|null = null;
 
   static instance(): ReplayController {
     this.#instance ??= new ReplayController();
@@ -96,8 +93,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' : '기록된 이전 실행 위치가 없습니다.';
   }
 
-  configure(kind: TargetKind, connect: (ws: string) => Promise<void>): void {
-    this.#kind = kind;
+  configure(connect: (ws: string) => Promise<void>): void {
     this.#connectToTarget = connect;
   }
 
@@ -145,7 +141,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     const completion = this.#beginReplay();
     try {
-      // 연결이 열린 뒤 응답이 오지 않는 경우도 제한 시간에 포함한다.
+      // 재실행 진행이 멈춘 연결도 대기 제한에 포함한다. 전체 재실행 시간은 제한하지 않는다.
       await Promise.race([this.#restartAndReplay(completion.promise), completion.promise]);
     } catch (error) {
       this.fail(error);
@@ -228,11 +224,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     const bytes = expression.length * 2;
     if (this.#consoleInputs.length >= REPLAY_LIMITS.consoleInputs ||
         this.#consoleBytes + bytes > REPLAY_LIMITS.consoleBytes) {
-      this.fail(new Error('콘솔 입력 기록 한도에 도달했습니다. 새 실행 컨텍스트에서 시작하세요.'));
+      this.fail(new Error(RECORDING_LIMIT_MESSAGE));
       return;
     }
     this.#consoleBytes += bytes;
-    this.#touchActivity();
     this.#activeConsoleInput = this.#consoleInputs.length;
     this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
   }
@@ -247,7 +242,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return;
     }
     if (this.#consoleSources.size >= REPLAY_LIMITS.pendingSources) {
-      this.fail(new Error('콘솔 소스 식별 한도에 도달했습니다.'));
+      this.fail(new Error(RECORDING_LIMIT_MESSAGE));
       return;
     }
     // VM 번호와 scriptId는 재연결마다 달라진다. 원문이 일치하는 입력 순번으로 비교한다.
@@ -263,7 +258,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
-    this.#touchActivity();
     this.session.beginReverse();
     this.#replayGeneration++;
     this.#isReplaying = true;
@@ -274,10 +268,21 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.#resolveReplay = resolve;
       this.#rejectReplay = reject;
     });
-    const timeout = setTimeout(() => {
-      this.fail(new Error('기록된 위치에 도달하기 전에 재실행 제한 시간이 지났습니다.'));
-    }, REPLAY_TIMEOUT_MS);
-    return {promise, clearTimeout: () => clearTimeout(timeout)};
+    let timeout: ReturnType<typeof setTimeout>;
+    this.#refreshReplayTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        this.fail(new Error('재실행 진행 없이 대기 제한 시간이 지났습니다. 연결과 대상 코드를 확인해 주세요.'));
+      }, REPLAY_STALL_TIMEOUT_MS);
+    };
+    this.#refreshReplayTimeout();
+    return {
+      promise,
+      clearTimeout: () => {
+        this.#refreshReplayTimeout = null;
+        clearTimeout(timeout);
+      },
+    };
   }
 
   async #restartAndReplay(completed: Promise<void>): Promise<void> {
@@ -347,8 +352,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return recorded;
     }
     let url = await this.#consoleSources.get(script.scriptId);
-    if (!url && this.#kind === 'node' && this.#consoleInputs.length === 0 && !this.#entryURL && script.sourceURL) {
-      // 사용자가 실행한 파일을 첫 정지에서 식별한다. 파일 경로나 명령을 요구하지 않는다.
+    if (!url && this.#consoleInputs.length === 0 && !this.#entryURL && script.sourceURL) {
+      // Node 파일과 웹페이지 스크립트를 같은 방식으로 첫 정지에서 식별한다. 파일 경로나 명령을 요구하지 않는다.
       this.#entryURL = script.sourceURL;
     }
     if (!url && script.sourceURL && script.sourceURL === this.#entryURL) {
@@ -383,7 +388,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         continue;
       }
       if (this.#recordingBreakpointIds.size >= REPLAY_LIMITS.breakpoints) {
-        throw new Error('기록용 브레이크포인트 한도에 도달했습니다.');
+        throw new Error(RECORDING_LIMIT_MESSAGE);
       }
       const breakpoint = await model.agent.invoke_setBreakpoint({location});
       if (breakpoint.getError()) {
@@ -435,7 +440,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         userVisible: Boolean(initial) || script.debuggerStatements.has(key) || hitUserBreakpoint || pausedOnException,
       });
       this.#lastPosition = position;
-      this.#touchActivity();
       if (this.#isReplaying) {
         this.#replayedPositions++;
         if (!this.session.replaying) {
@@ -467,7 +471,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error('모든 정지 건너뛰기로 실행 기록이 끊겼습니다.'));
       return false;
     }
-    this.#touchActivity();
     this.session.beginExecution(command);
     this.#notifyStatusChanged();
     if (command === 'pause') {
@@ -486,23 +489,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#notifyProgress();
   }
 
-  #touchActivity(): void {
-    this.#lastActivityAt = Date.now();
-    this.#idleTimer ??= setTimeout(() => this.#expireIfIdle(), REPLAY_LIMITS.idleMilliseconds);
-  }
-
-  #expireIfIdle(): void {
-    const remaining = REPLAY_LIMITS.idleMilliseconds - (Date.now() - this.#lastActivityAt);
-    if (remaining > 0) {
-      this.#idleTimer = setTimeout(() => this.#expireIfIdle(), remaining);
-      return;
-    }
-    this.fail(new Error('30분 동안 실행·입력 활동이 없어 기록을 해제했습니다. 새 실행 컨텍스트에서 시작하세요.'));
-  }
-
   #releaseRecording(): void {
-    clearTimeout(this.#idleTimer);
-    this.#idleTimer = undefined;
     this.#replayGeneration++;
     this.session.history.clear();
     this.#consoleInputs = [];
@@ -519,6 +506,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #notifyProgress(): void {
+    if (this.session.replaying) {
+      this.#refreshReplayTimeout?.();
+    }
     for (const resolve of this.#progressListeners) {
       resolve();
     }

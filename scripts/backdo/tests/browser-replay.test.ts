@@ -11,7 +11,6 @@ import puppeteer, {type Browser, type Page} from 'puppeteer-core';
 import {defaultChromePath} from '../../../test/conductor/paths.js';
 
 import type {HistorySnapshot} from './BrowserTestProtocol.js';
-import {BrowserTestTarget, type TestTarget} from './BrowserTestTarget.js';
 import {serveTestFrontend} from './FrontendTestServer.js';
 import {NodeTestTarget} from './NodeTestTarget.js';
 
@@ -32,12 +31,17 @@ interface TestSession {
 
 describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   let server: Awaited<ReturnType<typeof serveTestFrontend>>|undefined;
-  let target: TestTarget|undefined;
+  let target: NodeTestTarget|undefined;
+  let application: {
+    origin: string,
+    manager: {get: (id: string) => {ws: string, pid: number, port: number, restarts: number}, usage: {calibrations: number, calibrationsCreated: number, calibrationsDisposed: number}},
+    close: () => Promise<void>,
+  }|undefined;
+  let currentSessionId = '';
   let browser: Browser|undefined;
   let temporaryDirectory: string|undefined;
   let beforeRestart: (() => Promise<void>)|undefined;
   let beforeCalibration: ((page: Page) => Promise<void>)|undefined;
-  const calibrationProcesses = new Map<string, TestTarget>();
   const calibrationReports: object[] = [];
 
   after(async () => {
@@ -47,12 +51,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   });
 
   afterEach(async () => {
-    await browser?.close();
-    for (const process of calibrationProcesses.values()) {
-      await process.close();
-    }
-    calibrationProcesses.clear();
     await target?.close();
+    await application?.close();
+    await browser?.close();
     await server?.close();
     if (temporaryDirectory) {
       await rm(temporaryDirectory, {recursive: true, force: true});
@@ -60,6 +61,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     browser = undefined;
     target = undefined;
     server = undefined;
+    application = undefined;
+    currentSessionId = '';
     temporaryDirectory = undefined;
     beforeRestart = undefined;
     beforeCalibration = undefined;
@@ -74,7 +77,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       if (kind === 'node' && fixture === 'for-of-break.js') {
         continue;
       }
-      const input = kind === 'node' ? 'Node ws 직접 연결에서' : '기존 화면의 콘솔 입력에서';
+      const input = kind === 'node' ? 'Node의 포트 또는 ws 연결에서' : '기존 화면의 콘솔 입력에서';
       it(`${input} ${description} 두 번 되돌아간다`, async () => {
         const session = await openSession(kind, fixture);
         const previous = await runToReturn(session);
@@ -85,6 +88,10 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         await reverseAndVerify(session.page, next);
 
         assert.strictEqual(session.restartCount(), 2, '사용자가 요청한 뒤로가기 두 번만 재시작해야 한다');
+        if (kind === 'node') {
+          const effects = await readFile(path.join(path.dirname(session.entry), '실행 횟수.txt'), 'utf8');
+          assert.strictEqual(effects, '진입\n진입\n진입\n', '측정과 연결 교체 때문에 실행 횟수가 늘면 안 된다');
+        }
         assert.strictEqual(session.documentRequests(), 1, '문서 전체를 다시 불러오지 않아야 한다');
         assert.deepEqual(session.pageErrors, [], '브라우저에서 처리되지 않은 오류가 없어야 한다');
       }).timeout(60_000);
@@ -185,29 +192,12 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     };
     const session = await openSession('node', 'for.js');
     assert.strictEqual(session.restartCount(), 0);
-    assert.strictEqual(calibrationProcesses.size, 0);
+    assert.strictEqual(application?.manager.usage.calibrations, 0);
     assert.isTrue(await session.page.evaluate(() => window.backdoTest.isPaused()));
     const button = await session.page.$(REVERSE_BUTTON);
     assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '더미 준비 실패');
     assert.isTrue(await reverseDisabled(session.page));
     assert.isNull(await session.page.$(LOADING));
-  }).timeout(60_000);
-
-  it('더미 CDP 연결 실패도 더미만 정리하고 사용자 디버깅을 유지한다', async () => {
-    beforeCalibration = async () => {
-      for (const dummy of calibrationProcesses.values()) {
-        await dummy.close();
-      }
-    };
-    const session = await openSession('node', 'for.js');
-    assert.strictEqual(session.restartCount(), 0);
-    assert.strictEqual(calibrationProcesses.size, 0);
-    assert.isTrue(await session.page.evaluate(() => window.backdoTest.isPaused()));
-    const button = await session.page.$(REVERSE_BUTTON);
-    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), 'CDP 연결');
-    assert.isTrue(await reverseDisabled(session.page));
-    assert.isNull(await session.page.$(LOADING));
-    assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
 
   it('소스가 바뀌면 복원을 실패 처리하고 뒤로가기 버튼을 비활성화한다', async () => {
@@ -230,11 +220,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.strictEqual(session.documentRequests(), 1);
   }).timeout(60_000);
 
-  function currentTarget(): TestTarget {
-    if (!target) {
-      throw new Error('실행 중인 테스트 대상이 없습니다.');
+  function currentTarget() {
+    if (!application || !currentSessionId) {
+      throw new Error('등록된 실제 서버 세션이 없습니다.');
     }
-    return target;
+    return {session: application.manager.get(currentSessionId)};
   }
 
   async function openSession(
@@ -243,13 +233,37 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'backdo-frontend-'));
     const fixtureSource = await readFile(path.join(__dirname, '../fixtures', fixture), 'utf8');
     const code = setup ? fixtureSource.replace('i * 2', 'i * globalThis.seed') : fixtureSource;
-    const source = kind === 'page' ? `debugger;\n${code}` : code;
+    const marker = path.join(temporaryDirectory, '실행 횟수.txt');
+    const finished = "process.getBuiltinModule('fs').appendFileSync(process.argv[2], '뒷부분 실행\\n');";
+    // 비동기 예제는 함수가 반환한 Promise까지 끝난 뒤 종료 표식을 남긴다.
+    const nodeCode = fixture === 'async-await.js' ?
+        code.replace('asyncExample();', `asyncExample().then(() => { ${finished} });`) : `${code}\n${finished}`;
+    const source = kind === 'page' ? `debugger;\n${code}` :
+        `process.getBuiltinModule('fs').appendFileSync(process.argv[2], '진입\\n');\n${nodeCode}`;
     const entry = path.join(temporaryDirectory, fixture);
     await writeFile(entry, source);
     server = await serveTestFrontend(source);
-    target = kind === 'node' ? new NodeTestTarget({entry, output: null}) : new BrowserTestTarget(server.origin);
-    await target.start();
-    const initialTarget = {...target.session};
+    const serverDirectory = process.env.BACKDO_SERVER_DIR || path.resolve(process.cwd(), '../server');
+    const {startServer} = require(path.join(serverDirectory, 'app.js'));
+    application = await startServer({port: 0, frontendDir: process.env.BACKDO_FRONTEND_DIR});
+    if (!application) {
+      throw new Error('실제 BackDo 서버를 시작하지 못했습니다.');
+    }
+    let initialTarget: {ws: string, pid: number, port: number};
+    if (kind === 'node') {
+      target = new NodeTestTarget({
+        entry, args: [marker, '공백 있는 인자', ''], cwd: temporaryDirectory, output: null,
+        env: {BACKDO_FIRST: '첫 번째', BACKDO_SECOND: '두 번째', BACKDO_RESTORE_CONTEXT: '사용자 값'},
+      });
+      initialTarget = await target.start();
+    } else {
+      const response = await fetch(`${application.origin}/ws/open`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({port: 0}),
+      });
+      const opened = await response.json();
+      assert.isTrue(response.ok, JSON.stringify(opened));
+      initialTarget = {ws: opened.ws, pid: opened.browserPID, port: opened.port};
+    }
     browser = await puppeteer.launch({
       executablePath: process.env.CHROME_BIN || defaultChromePath(),
       headless: true, defaultViewport: {width: 1440, height: 1000},
@@ -258,82 +272,45 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     const page = await browser.newPage();
     const pageErrors: string[] = [];
     let documentRequests = 0;
-    page.on('request', request => {
-      if (request.resourceType() === 'document') {
-        documentRequests++;
-      }
-    });
+    page.on('request', request => { if (request.resourceType() === 'document') {documentRequests++;} });
     page.on('pageerror', error => pageErrors.push(error.message));
-    let connectedWS = target.session.ws;
-    let restartCount = 0;
-    let calibrationCount = 0;
-    let disposedCalibrationCount = 0;
-    const calibration: {position: HistorySnapshot['target']|null, pid?: number, port?: number, visiblePauses?: number} = {position: null};
-    await page.exposeFunction('createBackDoCalibrationProcess', async (requestedKind: 'node'|'page') => {
-      assert.strictEqual(requestedKind, kind);
-      calibrationCount++;
-      const before = await page.evaluate(() => window.backdoTest.snapshot());
-      calibration.position = before.position;
-      calibration.visiblePauses = before.visiblePauses.length;
-      const dummyEntry = path.join(path.dirname(entry), 'calibration.js');
-      await writeFile(dummyEntry, 'setInterval(() => {}, 1000);');
-      const dummy = kind === 'node' ? new NodeTestTarget({entry: dummyEntry, output: null, pauseOnStart: false}) :
-                                    new BrowserTestTarget(new URL(page.url()).origin);
-      try {
-        await dummy.start();
-        const {ws, pid, port} = dummy.session;
-        calibration.pid = pid;
-        calibration.port = port;
-        assert.notStrictEqual(pid, currentTarget().session.pid, '실제 별도 OS 프로세스여야 한다');
-        assert.notStrictEqual(port, currentTarget().session.port, '사용자 연결 포트를 공유하지 않아야 한다');
-        calibrationProcesses.set(ws, dummy);
-        await beforeCalibration?.(page);
-        return ws;
-      } catch (error) {
-        for (const [ws, owned] of calibrationProcesses) {
-          if (owned === dummy) {
-            calibrationProcesses.delete(ws);
-          }
+    const registered = new Promise<void>(resolve => {
+      page.on('response', response => {
+        if (response.url() === `${application?.origin}/sessions` && response.ok()) {
+          void response.json().then(result => { currentSessionId = result.id; resolve(); });
         }
-        await dummy.close();
-        throw error;
-      }
+      });
     });
-    await page.exposeFunction('disposeBackDoCalibrationProcess', async (ws: string) => {
-      const dummy = calibrationProcesses.get(ws);
-      if (dummy) {
-        await dummy.close();
-        calibrationProcesses.delete(ws);
-        disposedCalibrationCount++;
-        if (calibration.pid) {
-          assert.throws(() => process.kill(calibration.pid ?? 0, 0), /ESRCH/, '더미 프로세스가 종료되어야 한다');
-        }
-      }
+    await page.setRequestInterception(true);
+    page.on('request', request => {
+      void (async () => {
+        if (request.method() === 'POST' && request.url().endsWith('/restart')) {await beforeRestart?.();}
+        if (request.method() === 'POST' && request.url().includes('/calibrations/')) {await beforeCalibration?.(page);}
+        await request.continue();
+      })().catch(async error => {
+        await request.respond({status: 400, contentType: 'application/json', body: JSON.stringify({error: error.message})});
+      });
     });
-    await page.exposeFunction('restartBackDoTestTarget', async (address: {ws: string, kind: string}) => {
-      assert.strictEqual(address.kind, kind);
-      assert.strictEqual(address.ws, connectedWS);
-      restartCount++;
-      await beforeRestart?.();
-      connectedWS = (await currentTarget().restart()).ws;
-      return connectedWS;
-    });
-    await page.exposeFunction('discoverBackDoTestTarget', async (port: number) => {
-      assert.strictEqual(port, currentTarget().session.port);
-      return currentTarget().session.ws;
-    });
-    const entrypoint = kind === 'node' ? '/js_app.html' : input === 'page' ? '/inspector.html' : '/devtools_app.html';
-    const url = new URL(entrypoint, server.origin);
-    url.searchParams.set('ws', target.session.ws.replace(/^ws:\/\//, ''));
-    await page.goto(url.href, {waitUntil: 'domcontentloaded'});
-    await page.addScriptTag({type: 'module', url: `${server.origin}/models/replay/ReplayTestHarness.js`});
-    await page.waitForFunction(() => window.backdoTest?.ready(), {timeout: UI_TIMEOUT_MS});
-    if (withRestart) {
-      await page.evaluate(() => window.backdoTest.useTestLifecycle());
+    const entrypoint = kind === 'node' ? 'js_app.html' : input === 'page' ? 'inspector.html' : 'devtools_app.html';
+    const url = new URL(`/gen/front_end/${entrypoint}`, application.origin);
+    url.searchParams.set('backdoServer', withRestart ? application.origin : 'http://127.0.0.1:1');
+    if (kind === 'node' && fixture === 'for.js' && withRestart) {
+      url.searchParams.set('port', String(initialTarget.port));
+    } else {
+      url.searchParams.set('ws', initialTarget.ws.replace(/^ws:\/\//, ''));
     }
-    if (kind === 'page' && target instanceof BrowserTestTarget) {
+    await page.goto(url.href, {waitUntil: 'domcontentloaded'});
+    await page.addScriptTag({type: 'module', url: `${application.origin}/gen/front_end/models/replay/ReplayTestHarness.js`});
+    await page.waitForFunction(() => window.backdoTest?.ready(), {timeout: UI_TIMEOUT_MS});
+    if (withRestart) {await registered;}
+    if (kind === 'page') {
       if (input === 'page') {
-        await target.navigate(`${server.origin}/fixture.html`);
+        const inspected = await puppeteer.connect({browserURL: `http://127.0.0.1:${initialTarget.port}`});
+        const inspectedPage = (await inspected.pages())[0];
+        const connection = await inspectedPage.createCDPSession();
+        await connection.send('Page.navigate', {url: `${server.origin}/fixture.html`});
+        await connection.detach();
+        await inspected.disconnect();
       } else {
         if (setup) {
           await enterConsoleCode(page, setup.replace('BACKDO_ORIGIN', server.origin));
@@ -345,46 +322,36 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     if (withRestart) {
       await page.waitForFunction(() => window.backdoTest.calibrationFinished(), {timeout: UI_TIMEOUT_MS});
       const snapshot = await page.evaluate(() => window.backdoTest.snapshot());
+      assert.strictEqual(currentTarget().session.restarts, 0, '측정은 사용자 대상을 재시작하지 않아야 한다');
+      assert.strictEqual(currentTarget().session.pid, initialTarget.pid);
+      assert.strictEqual(currentTarget().session.ws, initialTarget.ws);
       if (!snapshot.error) {
         assert.isTrue(snapshot.calibrated);
         assert.isAbove(snapshot.estimatedReplayMs ?? 0, 0);
-        assert.strictEqual(restartCount, 0);
-        assert.strictEqual(calibrationCount, 1);
-        assert.strictEqual(disposedCalibrationCount, 1);
-        assert.strictEqual(calibrationProcesses.size, 0);
         assert.strictEqual(await page.evaluate(() => window.backdoTest.historyLength()), 1);
-        const initialPosition = calibration.position;
-        if (!initialPosition) {
-          assert.fail('측정 전 최초 정지 위치를 확인할 수 있어야 한다');
-        }
-        assert.deepEqual(snapshot.position, initialPosition, '측정 후 최초 정지 위치를 유지해야 한다');
+        assert.strictEqual(application.manager.usage.calibrationsCreated, 1);
+        assert.strictEqual(application.manager.usage.calibrationsDisposed, 1);
+        assert.strictEqual(application.manager.usage.calibrations, 0);
         await page.waitForFunction(() => window.backdoTest.snapshot().highlight !== null, {timeout: UI_TIMEOUT_MS});
         const rendered = await page.evaluate(() => window.backdoTest.snapshot());
-        assert.deepEqual(rendered.highlight, [initialPosition.lineNumber, initialPosition.columnNumber]);
-        assert.lengthOf(snapshot.visiblePauses, calibration.visiblePauses ?? 0, '측정 때문에 사용자 정지가 추가되면 안 된다');
-        assert.deepEqual(snapshot.transitions, [], '측정 중에는 사용자 화면 전환이 없어야 한다');
-        assert.strictEqual(currentTarget().session.pid, initialTarget.pid);
-        assert.strictEqual(currentTarget().session.ws, initialTarget.ws);
-        assert.strictEqual(currentTarget().session.port, initialTarget.port);
+        assert.deepEqual(rendered.highlight, [snapshot.position?.lineNumber, snapshot.position?.columnNumber]);
+        assert.deepEqual(snapshot.transitions, [], '측정 때문에 화면을 전환하면 안 된다');
         assert.isTrue(snapshot.sameDocument);
-        assert.isNull(await page.$(LOADING));
-        calibrationReports.push({
-          kind, input, userPID: initialTarget.pid, userPIDAfter: currentTarget().session.pid,
-          userWS: initialTarget.ws, userWSAfter: currentTarget().session.ws,
-          dummyPID: calibration.pid, dummyPort: calibration.port, userPort: initialTarget.port,
-          userRestarts: restartCount, dummyCreated: calibrationCount, dummyDisposed: disposedCalibrationCount,
-          roundTripMs: snapshot.estimatedReplayMs, position: snapshot.position, transitions: snapshot.transitions,
-          externalRequests: server?.effectCount(),
-        });
+        if (kind === 'node') {
+          assert.strictEqual(await readFile(marker, 'utf8').catch(() => ''), '', '측정 중 사용자 코드가 실행되면 안 된다');
+        }
+        calibrationReports.push({kind, input, targetPort: initialTarget.port, userPID: initialTarget.pid,
+          userPIDAfter: currentTarget().session.pid, roundTripMs: snapshot.estimatedReplayMs,
+          actualServerAPI: true, dummyCreated: application.manager.usage.calibrationsCreated,
+          dummyDisposed: application.manager.usage.calibrationsDisposed});
       }
     } else {
       await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
-      assert.strictEqual(restartCount, 0);
-      assert.strictEqual(calibrationCount, 0);
       assert.isFalse((await page.evaluate(() => window.backdoTest.snapshot())).calibrated);
     }
     assert.isTrue(await reverseDisabled(page));
-    return {page, source, entry, documentRequests: () => documentRequests, restartCount: () => restartCount, pageErrors};
+    return {page, source, entry, documentRequests: () => documentRequests,
+      restartCount: () => currentTarget().session.restarts, pageErrors};
   }
 
   async function enterConsoleCode(page: Page, source: string): Promise<void> {

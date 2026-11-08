@@ -54,6 +54,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #timing = new ReplayTiming();
   #entryURL = '';
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
+  #prepareTarget: (() => Promise<void>)|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
   #restartTarget: (() => Promise<string>)|null = null;
   #listeners: Common.EventTarget.EventDescriptor[] = [];
@@ -102,6 +103,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   get calibrating(): boolean {
     return this.#calibrationAbort !== null;
+  }
+
+  setPreparationHandler(prepare: (() => Promise<void>)|null): void {
+    this.#prepareTarget = prepare;
   }
 
   setCalibrationHandler(measure: ((signal: AbortSignal) => Promise<number>)|null): void {
@@ -379,7 +384,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #restartAndReplay(completed: Promise<void>): Promise<void> {
-    await this.#debuggerModel?.target().router()?.connection().disconnect();
     const ws = await this.#restartTarget?.();
     if (!ws || this.session.error) {
       throw new Error(this.session.error ?? '재시작한 대상의 연결 주소가 없습니다.');
@@ -504,6 +508,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     try {
       const generation = this.#replayGeneration;
+      if (!this.#isReplaying && !this.session.history.length) {
+        await this.#prepareTarget?.();
+      }
       const frame = details.callFrames[0];
       const initial = frame && !this.#scripts.has(frame.script.scriptId);
       const script = frame && await this.#recordedScript(frame.script);

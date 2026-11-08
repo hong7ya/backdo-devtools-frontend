@@ -25,6 +25,7 @@ interface NodeTestOptions {
   entry: string;
   args?: string[];
   cwd?: string;
+  env?: NodeJS.ProcessEnv;
   port?: number;
   pauseOnStart?: boolean;
   output?: Pick<NodeJS.WritableStream, 'write'>|null;
@@ -103,7 +104,7 @@ export class NodeTestTarget {
     const {entry, args = [], cwd = process.cwd(), output = process.stderr} = this.#options;
     const inspect = this.#options.pauseOnStart === false ? '--inspect' : '--inspect-brk';
     const child = spawn(process.execPath, [`${inspect}=127.0.0.1:${this.#inspectorPort}`, entry, ...args], {
-      cwd, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd, env: this.#options.env, stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', chunk => output?.write(chunk));
     child.stderr.on('data', chunk => output?.write(chunk));

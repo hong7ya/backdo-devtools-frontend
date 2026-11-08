@@ -64,7 +64,9 @@ export class InspectorMainImpl implements Common.Runnable.Runnable {
         await Replay.ReplayConnection.ReplayConnection.instance().initialize({
           kind: type,
           name: i18nString(UIStrings.main),
-      onTargetCreated: target => UI.Context.Context.instance().setFlavor(SDK.Target.Target, target),
+          onTargetCreated: target => UI.Context.Context.instance().setFlavor(SDK.Target.Target, target),
+          onTargetRestartStateChanged: (target, restarting) =>
+              target.model(Components.TargetDetachedDialog.TargetDetachedDialog)?.setRestarting(restarting),
           onConnectionLost: Components.TargetDetachedDialog.TargetDetachedDialog.connectionLost,
         });
     if (!connected) {

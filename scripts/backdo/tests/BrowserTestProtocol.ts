@@ -32,7 +32,6 @@ export interface ReplaySnapshot {
 }
 
 export interface BrowserTestClient {
-  useTestLifecycle(): void;
   ready(): boolean;
   calibrationFinished(): boolean;
   historyLength(): number;
@@ -46,9 +45,6 @@ export interface BrowserTestClient {
 declare global {
   interface Window {
     backdoTest: BrowserTestClient;
-    createBackDoCalibrationProcess(kind: 'node'|'page'): Promise<string>;
-    disposeBackDoCalibrationProcess(ws: string): Promise<void>;
-    restartBackDoTestTarget(target: {ws: string, kind: 'node'|'page'}): Promise<string>;
-    discoverBackDoTestTarget(port: number, kind: 'node'|'page'): Promise<string>;
+
   }
 }

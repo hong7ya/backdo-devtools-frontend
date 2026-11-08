@@ -10,6 +10,7 @@ import("../visibility.gni")
 devtools_module("replay") {
   sources = [
     "ExecutionHistory.ts",
+    "LocalTargetLifecycle.ts",
     "ReplayCalibration.ts",
     "ReplayConnection.ts",
     "ReplayController.ts",

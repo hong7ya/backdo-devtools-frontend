@@ -69,6 +69,7 @@ ts_library("unittests") {
   sources = [
     "JSPresentationUtils.test.ts",
     "Linkifier.test.ts",
+    "TargetDetachedDialog.test.ts",
   ]
 
   deps = [

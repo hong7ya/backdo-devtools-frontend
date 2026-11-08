@@ -9,6 +9,7 @@ import type * as Protocol from '../../../../generated/protocol.js';
 import * as UI from '../../legacy.js';
 
 export class TargetDetachedDialog extends SDK.SDKModel.SDKModel<void> implements ProtocolProxyApi.InspectorDispatcher {
+  #restarting = false;
   private static hideCrashedDialog: (() => void)|null;
   constructor(target: SDK.Target.Target) {
     super(target);
@@ -21,8 +22,15 @@ export class TargetDetachedDialog extends SDK.SDKModel.SDKModel<void> implements
     }
   }
 
+  /** 제어된 프로세스 교체만 종료 알림에서 제외한다. 다른 대상의 연결 오류는 그대로 표시한다. */
+  setRestarting(restarting: boolean): void {
+    this.#restarting = restarting;
+  }
+
   detached({reason}: Protocol.Inspector.DetachedEvent): void {
-    UI.RemoteDebuggingTerminatedScreen.RemoteDebuggingTerminatedScreen.show(reason);
+    if (!this.#restarting) {
+      UI.RemoteDebuggingTerminatedScreen.RemoteDebuggingTerminatedScreen.show(reason);
+    }
   }
 
   static connectionLost(message: Platform.UIString.LocalizedString): void {
@@ -30,6 +38,9 @@ export class TargetDetachedDialog extends SDK.SDKModel.SDKModel<void> implements
   }
 
   targetCrashed(): void {
+    if (this.#restarting) {
+      return;
+    }
     // In case of service workers targetCrashed usually signals that the worker is stopped
     // and in any case it is restarted automatically (in which case front-end will receive
     // targetReloadedAfterCrash event).

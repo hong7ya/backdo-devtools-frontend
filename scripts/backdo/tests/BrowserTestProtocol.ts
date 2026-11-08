@@ -30,6 +30,10 @@ export interface ReplaySnapshot {
 }
 
 export interface BrowserTestClient {
+  useTestLifecycle(): void;
+  ready(): boolean;
+  submitConsole(expression: string): void;
+  historyLength(): number;
   isPaused(): boolean;
   runToLine(lineNumber: number): Promise<void>;
   isPausedAtLine(lineNumber: number): boolean;
@@ -41,5 +45,7 @@ export interface BrowserTestClient {
 declare global {
   interface Window {
     backdoTest: BrowserTestClient;
+    restartBackDoTestTarget(target: {ws: string, kind: 'node'|'page'}): Promise<string>;
+    discoverBackDoTestTarget(port: number, kind: 'node'|'page'): Promise<string>;
   }
 }

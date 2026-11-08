@@ -1973,14 +1973,17 @@ Common.Revealer.registerRevealer({
   },
 });
 
-UI.Toolbar.registerToolbarItem({
-  actionId: 'sources.add-folder-to-workspace',
-  location: UI.Toolbar.ToolbarItemLocation.FILES_NAVIGATION_TOOLBAR,
-  label: i18nLazyString(UIStrings.addFolder),
-  loadItem: undefined,
-  order: undefined,
-  separator: undefined,
-});
+// 웹에서 실행할 때는 폴더 추가 액션을 등록하지 않으므로 도구 모음도 같은 조건을 따른다.
+if (!Host.InspectorFrontendHost.InspectorFrontendHostInstance.isHostedMode()) {
+  UI.Toolbar.registerToolbarItem({
+    actionId: 'sources.add-folder-to-workspace',
+    location: UI.Toolbar.ToolbarItemLocation.FILES_NAVIGATION_TOOLBAR,
+    label: i18nLazyString(UIStrings.addFolder),
+    loadItem: undefined,
+    order: undefined,
+    separator: undefined,
+  });
+}
 
 UI.Context.registerListener({
   contextTypes() {

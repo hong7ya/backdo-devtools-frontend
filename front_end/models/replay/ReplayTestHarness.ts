@@ -7,6 +7,7 @@ import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Sources from '../../panels/sources/sources.js';
 
+import {ReplayConnection} from './ReplayConnection.js';
 import {ReplayController} from './ReplayController.js';
 
 /** 브라우저 안에서만 사용하는 통합 테스트 도우미. Node 테스트에는 직렬화 가능한 결과만 전달한다. */
@@ -24,6 +25,32 @@ class ReplayTestHarness implements BrowserTestClient {
     this.#observeTransitions();
   }
 
+  useTestLifecycle(): void {
+    ReplayConnection.instance().setLifecycle({
+      discover: (port, kind) => window.discoverBackDoTestTarget(port, kind),
+      restart: target => window.restartBackDoTestTarget(target),
+    });
+  }
+
+  ready(): boolean {
+    return Boolean(this.#debuggerModel()?.target().model(SDK.RuntimeModel.RuntimeModel)?.defaultExecutionContext());
+  }
+
+  submitConsole(expression: string): void {
+    const target = this.#debuggerModel()?.target();
+    const context = target?.model(SDK.RuntimeModel.RuntimeModel)?.defaultExecutionContext();
+    const consoleModel = target?.model(SDK.ConsoleModel.ConsoleModel);
+    if (!context || !consoleModel) {
+      throw new Error('콘솔 입력을 실행할 대상이 없습니다.');
+    }
+    const message = consoleModel.addCommandMessage(context, expression);
+    void consoleModel.evaluateCommandInConsole(context, message, expression, true);
+  }
+
+  historyLength(): number {
+    return this.#controller.session.history.length;
+  }
+
   isPaused(): boolean {
     return this.#debuggerModel()?.isPaused() ?? false;
   }
@@ -34,7 +61,12 @@ class ReplayTestHarness implements BrowserTestClient {
     if (!model || !frame) {
       throw new Error('테스트를 진행할 정지 위치가 없습니다.');
     }
-    await model.setBreakpointByURL(frame.script.sourceURL, lineNumber, 2);
+    const breakpoint = await model.agent.invoke_setBreakpointByUrl({
+      scriptHash: frame.script.hash, lineNumber, columnNumber: 2,
+    });
+    if (breakpoint.getError()) {
+      throw new Error(breakpoint.getError());
+    }
     model.resume();
   }
 
@@ -54,11 +86,7 @@ class ReplayTestHarness implements BrowserTestClient {
   }
 
   snapshot(): ReplaySnapshot {
-    const frame = this.#debuggerModel()?.debuggerPausedDetails()?.callFrames[0];
-    const position = frame ? {
-      url: frame.script.sourceURL, hash: frame.script.hash,
-      lineNumber: frame.location().lineNumber, columnNumber: frame.location().columnNumber,
-    } : null;
+    const position = this.#controller.currentPosition;
     return {
       error: this.#controller.session.error,
       position,

@@ -6,14 +6,23 @@ import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
+import type {ExecutionPosition} from './ExecutionHistory.js';
+import type {TargetKind} from './ReplayEndpoint.js';
 import {ReplaySession} from './ReplaySession.js';
 
-const SESSION_REQUEST_TIMEOUT_MS = 15_000;
 const REPLAY_TIMEOUT_MS = 30_000;
 
-interface ManagedTarget {
-  ws: string;
-  entryURL: string;
+interface ConsoleInput {
+  expression: string;
+  useCommandLineAPI: boolean;
+  userGesture: boolean;
+  afterPosition: number;
+}
+
+interface RecordedScript {
+  url: string;
+  positions: Set<string>;
+  debuggerStatements: Set<string>;
 }
 
 export const enum Events {
@@ -24,18 +33,26 @@ interface EventTypes {
   [Events.CHANGED]: void;
 }
 
-/** 실행 관리기가 소유한 Node 프로세스에서 진입 파일의 실행 위치를 기록하고 재실행한다. */
+/** 입력 경로와 관계없이 실행 위치를 기록한다. 프로세스 재시작 방법은 외부에서 주입한다. */
 export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTypes> {
   static #instance: ReplayController;
   readonly session = new ReplaySession();
-  #sessionToken = '';
+  #kind: TargetKind = 'page';
   #entryURL = '';
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
+  #restartTarget: (() => Promise<string>)|null = null;
+  #listeners: Common.EventTarget.EventDescriptor[] = [];
   #recordingBreakpointIds = new Set<string>();
-  #recordablePositions = new Set<string>();
-  #debuggerStatementPositions = new Set<string>();
-  #hasRecordingBreakpoints = false;
+  #scripts = new Map<string, RecordedScript>();
+  #consoleSources = new Map<string, Promise<string|null>>();
+  #consoleInputs: ConsoleInput[] = [];
+  #activeConsoleInput: number|null = null;
+  #replayGeneration = 0;
+  #replayInputCount = 0;
+  #replayedPositions = 0;
+  #progressListeners = new Set<() => void>();
+  #lastPosition: ExecutionPosition|null = null;
   #isReplaying = false;
   #resolveReplay: (() => void)|null = null;
   #rejectReplay: ((error: Error) => void)|null = null;
@@ -49,62 +66,58 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     return this.#isReplaying;
   }
 
+  get currentPosition(): ExecutionPosition|null {
+    return this.#lastPosition;
+  }
+
+  get inputCount(): number {
+    return this.#consoleInputs.length;
+  }
+
   canReverse(model: SDK.DebuggerModel.DebuggerModel|null): boolean {
-    return model === this.#debuggerModel && Boolean(model?.isPaused()) && !this.#isReplaying && this.session.canReverse;
+    return Boolean(this.#restartTarget) && model === this.#debuggerModel && Boolean(model?.isPaused()) &&
+        !this.#isReplaying && this.session.canReverse;
   }
 
   get status(): string {
     if (this.session.error) {
-      return `BackDo unavailable: ${this.session.error}`;
-    }
-    if (!this.#sessionToken) {
-      return 'Start a managed Node session with out/Default/gen/scripts/backdo/debug.js to use BackDo';
+      return `뒤로가기 사용 불가: ${this.session.error}`;
     }
     if (this.#isReplaying) {
-      return 'Replaying the process to the previous recorded position…';
+      return '이전 실행 위치까지 다시 실행하고 있습니다.';
     }
-    return this.session.canReverse ? 'Go to the previous recorded position (restarts and re-executes the process)' :
-                                     'No previous recorded position in the entry script';
+    if (!this.#restartTarget) {
+      return '실행 위치를 기록 중입니다. 뒤로가기는 프로세스 재시작 연동 후 사용할 수 있습니다.';
+    }
+    return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' : '기록된 이전 실행 위치가 없습니다.';
   }
 
-  async configure(token: string, connect: (ws: string) => Promise<void>): Promise<ManagedTarget> {
-    this.#sessionToken = token;
+  configure(kind: TargetKind, connect: (ws: string) => Promise<void>): void {
+    this.#kind = kind;
     this.#connectToTarget = connect;
-    const target = await this.#requestManagedTarget('session');
-    this.#entryURL = target.entryURL;
-    Common.Settings.Settings.instance().moduleSetting('breakpoints-active').addChangeListener(() => {
-      if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
-        this.fail(new Error('Breakpoints were disabled; start a new session to record a complete path'));
-      }
-    });
-    return target;
+  }
+
+  setRestartHandler(restart: (() => Promise<string>)|null): void {
+    this.#restartTarget = restart;
+    this.#notifyStatusChanged();
   }
 
   attach(target: SDK.Target.Target): void {
     const model = target.model(SDK.DebuggerModel.DebuggerModel);
     if (!model) {
-      throw new Error('The target does not provide a debugger');
+      throw new Error('디버거를 제공하지 않는 대상입니다.');
     }
+    Common.EventTarget.removeEventListeners(this.#listeners);
     this.#debuggerModel = model;
-    this.#recordingBreakpointIds = new Set();
-    this.#recordablePositions = new Set();
-    this.#debuggerStatementPositions = new Set();
-    this.#hasRecordingBreakpoints = false;
+    this.#recordingBreakpointIds.clear();
+    this.#scripts.clear();
+    this.#consoleSources.clear();
+    this.#activeConsoleInput = null;
     model.setPauseInterceptor(details => this.#handlePause(details));
     model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
-    model.addEventListener(SDK.DebuggerModel.Events.ScriptSourceWasEdited, () => {
-      this.fail(new Error('The source was edited; start a new session'));
-    });
-    model.addEventListener(SDK.DebuggerModel.Events.DebuggerPaused, () => {
-      // SDK가 최종 정지를 알린 뒤 완료한다. 에디터 준비는 화면 계층에서 별도로 기다린다.
-      if (this.#isReplaying && !this.session.replaying && !this.session.error) {
-        queueMicrotask(() => this.#resolveReplay?.());
-      }
-      this.#notifyStatusChanged();
-    });
-    model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#notifyStatusChanged());
+    this.#observeTarget(model);
     if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
-      this.fail(new Error('Enable breakpoints and start a new managed session'));
+      this.fail(new Error('브레이크포인트를 활성화한 새 세션에서 기록을 시작하세요.'));
     }
     this.#notifyStatusChanged();
   }
@@ -125,6 +138,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.#resolveReplay = null;
       this.#rejectReplay = null;
       this.#isReplaying = false;
+      this.#notifyProgress();
       this.#notifyStatusChanged();
     }
   }
@@ -134,7 +148,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return;
     }
     this.session.fail(error);
-    this.#rejectReplay?.(new Error(this.session.error ?? 'Replay failed'));
+    this.#rejectReplay?.(new Error(this.session.error ?? '재실행 실패'));
     this.#debuggerModel?.setExecutionInterceptor(null);
     this.#debuggerModel?.setPauseInterceptor(null);
     for (const breakpointId of this.#recordingBreakpointIds) {
@@ -145,54 +159,167 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.#isReplaying) {
       void this.#debuggerModel?.agent.invoke_pause();
     }
+    this.#notifyProgress();
     this.#notifyStatusChanged();
+  }
+
+  #observeTarget(model: SDK.DebuggerModel.DebuggerModel): void {
+    const breakpoints = Common.Settings.Settings.instance().moduleSetting('breakpoints-active');
+    this.#listeners.push(breakpoints.addChangeListener(() => {
+      if (!breakpoints.get()) {
+        this.fail(new Error('브레이크포인트 비활성화로 실행 기록이 끊겼습니다.'));
+      }
+    }));
+    this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.ScriptSourceWasEdited, () => {
+      this.fail(new Error('소스가 변경되었습니다. 새 세션에서 기록을 시작하세요.'));
+    }));
+    this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.ParsedScriptSource, event => {
+      this.#identifyConsoleSource(event.data);
+    }));
+    this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.DebuggerPaused, () => {
+      // SDK가 최종 정지를 알린 뒤 완료한다. 에디터 준비는 화면 계층에서 기다린다.
+      if (this.#isReplaying && !this.session.replaying && !this.session.error) {
+        queueMicrotask(() => this.#resolveReplay?.());
+      }
+      this.#notifyStatusChanged();
+    }));
+    this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#notifyStatusChanged()));
+    const consoleModel = model.target().model(SDK.ConsoleModel.ConsoleModel);
+    if (consoleModel) {
+      this.#listeners.push(consoleModel.addEventListener(SDK.ConsoleModel.Events.CommandWillBeEvaluated, event => {
+        this.#recordConsoleInput(event.data);
+      }));
+    }
+  }
+
+  #recordConsoleInput(command: SDK.ConsoleModel.ConsoleCommand): void {
+    if (this.session.error || this.#isReplaying) {
+      return;
+    }
+    if (this.#debuggerModel?.isPaused()) {
+      this.fail(new Error('일시정지 중 콘솔에서 실행한 코드는 복원할 수 없습니다. 새 실행 컨텍스트에서 시작하세요.'));
+      return;
+    }
+    const {expression, useCommandLineAPI, userGesture} = command;
+    this.#activeConsoleInput = this.#consoleInputs.length;
+    this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
+  }
+
+  #identifyConsoleSource(script: SDK.Script.Script): void {
+    const index = this.#activeConsoleInput;
+    if (index === null) {
+      return;
+    }
+    const input = this.#consoleInputs[index];
+    if (!input) {
+      return;
+    }
+    // VM 번호와 scriptId는 재연결마다 달라진다. 원문이 일치하는 입력 순번으로 비교한다.
+    this.#consoleSources.set(script.scriptId, script.debuggerModel.agent.invoke_getScriptSource({scriptId: script.scriptId})
+        .then(source => !source.getError() && source.scriptSource === input.expression ?
+                  `backdo-console:///${index + 1}` : null, () => null));
   }
 
   #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
     this.session.beginReverse();
+    this.#replayGeneration++;
     this.#isReplaying = true;
+    this.#replayedPositions = 0;
+    this.#replayInputCount = 0;
     this.#notifyStatusChanged();
     const promise = new Promise<void>((resolve, reject) => {
       this.#resolveReplay = resolve;
       this.#rejectReplay = reject;
     });
     const timeout = setTimeout(() => {
-      this.fail(new Error('Replay timed out before reaching the recorded position'));
+      this.fail(new Error('기록된 위치에 도달하기 전에 재실행 제한 시간이 지났습니다.'));
     }, REPLAY_TIMEOUT_MS);
     return {promise, clearTimeout: () => clearTimeout(timeout)};
   }
 
   async #restartAndReplay(completed: Promise<void>): Promise<void> {
     await this.#debuggerModel?.target().router()?.connection().disconnect();
-    const target = await this.#requestManagedTarget('restart');
+    const ws = await this.#restartTarget?.();
+    if (!ws || this.session.error) {
+      throw new Error(this.session.error ?? '재시작한 대상의 연결 주소가 없습니다.');
+    }
+    await this.#connectToTarget?.(ws);
     if (this.session.error) {
       throw new Error(this.session.error);
     }
-    if (target.entryURL !== this.#entryURL) {
-      throw new Error('The managed entry script changed');
-    }
-    await this.#connectToTarget?.(target.ws);
+    // 콘솔 원문도 실행 입력이다. 변수·힙을 저장하지 않고 같은 순서로 다시 제출한다.
+    const generation = this.#replayGeneration;
+    void this.#replayConsoleInputs(generation).catch(error => {
+      if (generation === this.#replayGeneration && this.session.replaying) {
+        this.fail(error);
+      }
+    });
     await completed;
   }
 
-  async #requestManagedTarget(operation: 'session'|'restart'): Promise<ManagedTarget> {
-    const response = await fetch(`/__backdo/${operation}`, {
-      method: operation === 'restart' ? 'POST' : 'GET',
-      headers: {'X-BackDo-Session': this.#sessionToken},
-      signal: AbortSignal.timeout(SESSION_REQUEST_TIMEOUT_MS),
-    });
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || `BackDo session request failed (${response.status})`);
+  async #replayConsoleInputs(generation: number): Promise<void> {
+    const runtime = this.#debuggerModel?.target().runtimeAgent();
+    if (!runtime) {
+      throw new Error('콘솔 코드를 실행할 대상이 없습니다.');
     }
-    const ws = new URL(result.ws);
-    if (ws.protocol !== 'ws:' || ws.hostname !== '127.0.0.1' || typeof result.entryURL !== 'string') {
-      throw new Error('Invalid local target connection');
+    for (let index = 0; index < this.#consoleInputs.length; index++) {
+      const input = this.#consoleInputs[index];
+      await this.#waitForInputPosition(input.afterPosition, generation);
+      if (generation !== this.#replayGeneration || !this.session.replaying || this.session.error) {
+        return;
+      }
+      this.#activeConsoleInput = index;
+      this.#replayInputCount = index + 1;
+      const response = await runtime.invoke_evaluate({
+        expression: input.expression,
+        includeCommandLineAPI: input.useCommandLineAPI,
+        userGesture: input.userGesture,
+        objectGroup: 'console',
+        replMode: true,
+        awaitPromise: false,
+      });
+      // 직전 복원의 evaluate 응답은 다음 재시작에서 취소될 수 있다. 새 작업에는 섞지 않는다.
+      if (generation !== this.#replayGeneration) {
+        return;
+      }
+      if (response.getError() && this.session.replaying) {
+        throw new Error(response.getError());
+      }
     }
-    return {ws: result.ws, entryURL: result.entryURL};
   }
 
-  async #installRecordingBreakpoints(script: SDK.Script.Script): Promise<void> {
+  async #waitForInputPosition(position: number, generation: number): Promise<void> {
+    while (generation === this.#replayGeneration && this.session.replaying && !this.session.error &&
+           this.#replayedPositions < position) {
+      await new Promise<void>(resolve => this.#progressListeners.add(resolve));
+    }
+    if (generation === this.#replayGeneration && this.session.replaying && this.#replayedPositions !== position) {
+      throw new Error('콘솔 입력 시점이 기록된 실행 순서와 달라졌습니다.');
+    }
+  }
+
+  async #recordedScript(script: SDK.Script.Script): Promise<RecordedScript|null> {
+    const recorded = this.#scripts.get(script.scriptId);
+    if (recorded) {
+      return recorded;
+    }
+    let url = await this.#consoleSources.get(script.scriptId);
+    if (!url && this.#kind === 'node' && this.#consoleInputs.length === 0 && !this.#entryURL && script.sourceURL) {
+      // 사용자가 실행한 파일을 CDP의 첫 정지에서 식별한다. 파일 경로나 명령을 요구하지 않는다.
+      this.#entryURL = script.sourceURL;
+    }
+    if (!url && script.sourceURL && script.sourceURL === this.#entryURL) {
+      url = script.sourceURL;
+    }
+    if (!url) {
+      return null;
+    }
+    const result = await this.#installRecordingBreakpoints(script, url);
+    this.#scripts.set(script.scriptId, result);
+    return result;
+  }
+
+  async #installRecordingBreakpoints(script: SDK.Script.Script, url: string): Promise<RecordedScript> {
     const model = script.debuggerModel;
     const result = await model.agent.invoke_getPossibleBreakpoints({
       start: {scriptId: script.scriptId, lineNumber: script.lineOffset, columnNumber: script.columnOffset},
@@ -202,12 +329,14 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (result.getError()) {
       throw new Error(result.getError());
     }
+    const positions = new Set<string>();
+    const debuggerStatements = new Set<string>();
     for (const location of result.locations) {
       const key = `${location.lineNumber}:${location.columnNumber ?? 0}`;
       if (location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement) {
-        this.#debuggerStatementPositions.add(key);
+        debuggerStatements.add(key);
       }
-      if (this.#recordablePositions.has(key)) {
+      if (positions.has(key)) {
         continue;
       }
       const breakpoint = await model.agent.invoke_setBreakpoint({location});
@@ -216,12 +345,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       const actual = breakpoint.actualLocation;
       if (actual.lineNumber !== location.lineNumber || actual.columnNumber !== location.columnNumber) {
-        throw new Error('The runtime moved a recording breakpoint to a different position');
+        throw new Error('런타임이 기록용 브레이크포인트 위치를 변경했습니다.');
       }
       this.#recordingBreakpointIds.add(breakpoint.breakpointId);
-      this.#recordablePositions.add(key);
+      positions.add(key);
     }
-    this.#hasRecordingBreakpoints = true;
+    return {url, positions, debuggerStatements};
   }
 
   async #handlePause(details: SDK.DebuggerModel.DebuggerPausedDetails): Promise<boolean> {
@@ -230,7 +359,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     try {
       const frame = details.callFrames[0];
-      if (!frame || frame.script.sourceURL !== this.#entryURL) {
+      const initial = frame && !this.#scripts.has(frame.script.scriptId);
+      const script = frame && await this.#recordedScript(frame.script);
+      if (!frame || !script) {
         if (this.#isReplaying) {
           await this.#resumeExecution();
           return true;
@@ -239,28 +370,32 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#notifyStatusChanged();
         return false;
       }
-      const initial = !this.#hasRecordingBreakpoints;
-      if (initial) {
-        await this.#installRecordingBreakpoints(frame.script);
-      }
       const {lineNumber, columnNumber} = frame.location();
       const key = `${lineNumber}:${columnNumber}`;
-      if (!this.#recordablePositions.has(key)) {
-        throw new Error('This pause is not a reproducible breakpoint position; start a new session');
+      if (!script.positions.has(key)) {
+        throw new Error('일반 브레이크포인트로 재현할 수 없는 정지 위치입니다.');
       }
       const hitUserBreakpoint = details.breakpointIds.some(id => !this.#recordingBreakpointIds.has(id));
       const pausedOnException = details.reason === Protocol.Debugger.PausedEventReason.Exception ||
           details.reason === Protocol.Debugger.PausedEventReason.PromiseRejection;
-      const userVisible = initial || this.#debuggerStatementPositions.has(key) || hitUserBreakpoint || pausedOnException;
+      const position = {url: script.url, hash: frame.script.hash, lineNumber, columnNumber};
       const disposition = this.session.recordPause({
-        position: {url: frame.script.sourceURL, hash: frame.script.hash, lineNumber, columnNumber},
+        position,
         depth: details.callFrames.length,
-        userVisible,
+        userVisible: Boolean(initial) || script.debuggerStatements.has(key) || hitUserBreakpoint || pausedOnException,
       });
+      this.#lastPosition = position;
+      if (this.#isReplaying) {
+        this.#replayedPositions++;
+        if (!this.session.replaying) {
+          this.#consoleInputs.splice(this.#replayInputCount);
+        }
+      }
       if (disposition === 'continue') {
         await this.#resumeExecution();
         return true;
       }
+      this.#notifyProgress();
       this.#notifyStatusChanged();
       return false;
     } catch (error) {
@@ -273,11 +408,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.#isReplaying) {
       return true;
     }
-    if (this.session.error) {
+    if (this.session.error || !this.#scripts.size) {
       return false;
     }
     if (command === 'skip-pauses') {
-      this.fail(new Error('Skipping pauses interrupts recording; start a new session'));
+      this.fail(new Error('모든 정지 건너뛰기로 실행 기록이 끊겼습니다.'));
       return false;
     }
     this.session.beginExecution(command);
@@ -295,6 +430,14 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (response?.getError()) {
       throw new Error(response.getError());
     }
+    this.#notifyProgress();
+  }
+
+  #notifyProgress(): void {
+    for (const resolve of this.#progressListeners) {
+      resolve();
+    }
+    this.#progressListeners.clear();
   }
 
   #notifyStatusChanged(): void {

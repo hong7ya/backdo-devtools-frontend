@@ -8,6 +8,7 @@ import * as i18n from '../../core/i18n/i18n.js';
 import * as Root from '../../core/root/root.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import type * as Protocol from '../../generated/protocol.js';
+import * as Replay from '../../models/replay/replay.js';
 import * as MobileThrottling from '../../panels/mobile_throttling/mobile_throttling.js';
 import * as Security from '../../panels/security/security.js';
 import * as Components from '../../ui/legacy/components/utils/utils.js';
@@ -58,56 +59,67 @@ export class InspectorMainImpl implements Common.Runnable.Runnable {
   }
 
   async run(): Promise<void> {
-    let firstCall = true;
-    await SDK.Connections.initMainConnection(async () => {
-      const type = Root.Runtime.Runtime.queryParam('v8only') ?
-          SDK.Target.Type.NODE :
-          (Root.Runtime.Runtime.queryParam('targetType') === 'tab' ? SDK.Target.Type.TAB : SDK.Target.Type.FRAME);
-      // TODO(crbug.com/1348385): support waiting for debugger with tab target.
-      const waitForDebuggerInPage =
-          type === SDK.Target.Type.FRAME && Root.Runtime.Runtime.queryParam('panel') === 'sources';
-      const name = type === SDK.Target.Type.FRAME ? i18nString(UIStrings.main) : i18nString(UIStrings.tab);
-      const target = SDK.TargetManager.TargetManager.instance().createTarget(
-          'main', name, type, null, undefined, waitForDebuggerInPage);
-
-      const waitForPrimaryPageTarget = (): Promise<SDK.Target.Target> => {
-        return new Promise(resolve => {
-          const targetManager = SDK.TargetManager.TargetManager.instance();
-          targetManager.observeTargets({
-            targetAdded: (target: SDK.Target.Target): void => {
-              if (target === targetManager.primaryPageTarget()) {
-                target.setName(i18nString(UIStrings.main));
-                resolve(target);
-              }
-            },
-            targetRemoved: (_: unknown): void => {},
-          });
+    const type = Root.Runtime.Runtime.queryParam('v8only') ? 'node' : 'page';
+    const connected = !Root.Runtime.Runtime.queryParam('targetType') &&
+        await Replay.ReplayConnection.ReplayConnection.instance().initialize({
+          kind: type,
+          name: i18nString(UIStrings.main),
+      onTargetCreated: target => UI.Context.Context.instance().setFlavor(SDK.Target.Target, target),
+          onConnectionLost: Components.TargetDetachedDialog.TargetDetachedDialog.connectionLost,
         });
-      };
-      await waitForPrimaryPageTarget();
+    if (!connected) {
+      let firstCall = true;
+      await SDK.Connections.initMainConnection(async () => {
+        const type = Root.Runtime.Runtime.queryParam('v8only') ?
+            SDK.Target.Type.NODE :
+            (Root.Runtime.Runtime.queryParam('targetType') === 'tab' ? SDK.Target.Type.TAB : SDK.Target.Type.FRAME);
+        // TODO(crbug.com/1348385): support waiting for debugger with tab target.
+        const waitForDebuggerInPage =
+            type === SDK.Target.Type.FRAME && Root.Runtime.Runtime.queryParam('panel') === 'sources';
+        const name = type === SDK.Target.Type.FRAME ? i18nString(UIStrings.main) : i18nString(UIStrings.tab);
+        const target = SDK.TargetManager.TargetManager.instance().createTarget(
+            'main', name, type, null, undefined, waitForDebuggerInPage);
 
-      // Only resume target during the first connection,
-      // subsequent connections are due to connection hand-over,
-      // there is no need to pause in debugger.
-      if (!firstCall) {
-        return;
-      }
-      firstCall = false;
+        const waitForPrimaryPageTarget = (): Promise<SDK.Target.Target> => {
+          return new Promise(resolve => {
+            const targetManager = SDK.TargetManager.TargetManager.instance();
+            targetManager.observeTargets({
+              targetAdded: (target: SDK.Target.Target): void => {
+                if (target === targetManager.primaryPageTarget()) {
+                  target.setName(i18nString(UIStrings.main));
+                  resolve(target);
+                }
+              },
+              targetRemoved: (_: unknown): void => {},
+            });
+          });
+        };
+        await waitForPrimaryPageTarget();
 
-      if (waitForDebuggerInPage) {
-        const debuggerModel = target.model(SDK.DebuggerModel.DebuggerModel);
-        if (debuggerModel) {
-          if (!debuggerModel.isReadyToPause()) {
-            await debuggerModel.once(SDK.DebuggerModel.Events.DebuggerIsReadyToPause);
-          }
-          debuggerModel.pause();
+        // Only resume target during the first connection,
+        // subsequent connections are due to connection hand-over,
+        // there is no need to pause in debugger.
+        if (!firstCall) {
+          return;
         }
-      }
+        firstCall = false;
 
-      if (type !== SDK.Target.Type.TAB) {
-        void target.runtimeAgent().invoke_runIfWaitingForDebugger();
-      }
-    }, Components.TargetDetachedDialog.TargetDetachedDialog.connectionLost);
+        if (waitForDebuggerInPage) {
+          const debuggerModel = target.model(SDK.DebuggerModel.DebuggerModel);
+          if (debuggerModel) {
+            if (!debuggerModel.isReadyToPause()) {
+              await debuggerModel.once(SDK.DebuggerModel.Events.DebuggerIsReadyToPause);
+            }
+            debuggerModel.pause();
+          }
+        }
+
+        if (type !== SDK.Target.Type.TAB) {
+          void target.runtimeAgent().invoke_runIfWaitingForDebugger();
+        }
+      }, Components.TargetDetachedDialog.TargetDetachedDialog.connectionLost);
+
+    }
 
     new SourcesPanelIndicator();
     new BackendSettingsSync();

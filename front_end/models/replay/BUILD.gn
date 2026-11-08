@@ -10,12 +10,15 @@ import("../visibility.gni")
 devtools_module("replay") {
   sources = [
     "ExecutionHistory.ts",
+    "ReplayConnection.ts",
     "ReplayController.ts",
     "ReplayEndpoint.ts",
     "ReplaySession.ts",
   ]
   deps = [
     "../../core/common:bundle",
+    "../../core/platform:bundle",
+    "../../core/protocol_client:bundle",
     "../../core/sdk:bundle",
     "../../generated:protocol",
   ]
@@ -36,6 +39,7 @@ ts_library("unittests") {
   testonly = true
   sources = [
     "ExecutionHistory.test.ts",
+    "ReplayConnection.test.ts",
     "ReplayController.test.ts",
     "ReplayEndpoint.test.ts",
     "ReplaySession.test.ts",

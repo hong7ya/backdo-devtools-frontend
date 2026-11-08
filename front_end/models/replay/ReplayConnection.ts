@@ -6,6 +6,7 @@ import * as Common from '../../core/common/common.js';
 import type * as Platform from '../../core/platform/platform.js';
 import * as ProtocolClient from '../../core/protocol_client/protocol_client.js';
 import * as SDK from '../../core/sdk/sdk.js';
+import * as Bindings from '../bindings/bindings.js';
 
 import {LocalTargetLifecycle} from './LocalTargetLifecycle.js';
 import {type CalibrationProcess, measureRoundTrip} from './ReplayCalibration.js';
@@ -48,6 +49,8 @@ export class ReplayConnection {
 
   constructor(controller = ReplayController.instance()) {
     this.#controller = controller;
+    controller.setScriptFilter(script => !Bindings.IgnoreListManager.IgnoreListManager.instance().isUserIgnoreListedURL(
+        script.sourceURL, {isContentScript: script.isContentScript()}));
   }
 
   static instance(): ReplayConnection {

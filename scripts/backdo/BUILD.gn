@@ -16,6 +16,9 @@ copy_to_gen("fixtures") {
     "fixtures/fetch.js",
     "fixtures/for-of-break.js",
     "fixtures/for.js",
+    "fixtures/modules-dynamic.js",
+    "fixtures/modules-helper.mjs",
+    "fixtures/modules-static.mjs",
   ]
 }
 

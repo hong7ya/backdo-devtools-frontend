@@ -168,6 +168,7 @@ export type ExecutionCommand = 'resume'|'step-into'|'step-over'|'step-out'|'paus
 export class DebuggerModel extends SDKModel<EventTypes> {
   #pauseInterceptor: ((details: DebuggerPausedDetails) => Promise<boolean>)|null = null;
   #executionInterceptor: ((command: ExecutionCommand) => boolean)|null = null;
+  #scriptExecutionPreparation: ((script: Script) => Promise<void>)|null = null;
   #internalPause = false;
 
   // 기록용 내부 정지는 바인딩과 UI에 전달되기 전에 처리한다.
@@ -177,6 +178,10 @@ export class DebuggerModel extends SDKModel<EventTypes> {
 
   setExecutionInterceptor(interceptor: ((command: ExecutionCommand) => boolean)|null): void {
     this.#executionInterceptor = interceptor;
+  }
+
+  setScriptExecutionPreparation(prepare: ((script: Script) => Promise<void>)|null): void {
+    this.#scriptExecutionPreparation = prepare;
   }
 
   readonly agent: ProtocolProxyApi.DebuggerApi;
@@ -722,6 +727,14 @@ export class DebuggerModel extends SDKModel<EventTypes> {
       const script = this.scriptForId((auxData as PausedOnInstrumentationData).scriptId);
       if (this.#synchronizeBreakpointsCallback && script) {
         await this.#synchronizeBreakpointsCallback(script);
+      }
+      if (this.#scriptExecutionPreparation) {
+        if (script) {
+          await this.#scriptExecutionPreparation(script);
+        }
+        // 파일 준비를 위한 내부 정지는 사용자가 선택한 Step·Resume을 변경하지 않는다.
+        await this.agent.invoke_resume({terminateOnResume: false});
+        return;
       }
       this.resume();
       return;

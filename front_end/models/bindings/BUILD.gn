@@ -75,6 +75,7 @@ devtools_entrypoint("bundle") {
     "../formatter/*",
     "../issues_manager/*",
     "../persistence/*",
+    "../replay/*",
     "../source_map_scopes/*",
   ]
 

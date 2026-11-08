@@ -46,6 +46,7 @@ devtools_entrypoint("bundle") {
 
   visibility = [
     "../../../../test/interactions/text_editor/*",
+    "../../../models/replay:browser_test_support",
     "../../legacy/components/*",
   ]
   visibility += default_components_visibility

@@ -43,6 +43,7 @@ import * as Extensions from '../../models/extensions/extensions.js';
 import * as Replay from '../../models/replay/replay.js';
 import * as Workspace from '../../models/workspace/workspace.js';
 import * as IconButton from '../../ui/components/icon_button/icon_button.js';
+import * as TextEditor from '../../ui/components/text_editor/text_editor.js';
 import * as ObjectUI from '../../ui/legacy/components/object_ui/object_ui.js';
 import type * as SourceFrame from '../../ui/legacy/components/source_frame/source_frame.js';
 import * as UI from '../../ui/legacy/legacy.js';
@@ -929,10 +930,11 @@ export class SourcesPanel extends UI.Panel.Panel implements
         continue;
       }
       const frame = this.sourcesViewInternal.currentSourceFrame();
-      const token = frame?.textEditor.shadowRoot?.querySelector('.cm-executionToken');
-      if (frame && token && this.sourcesViewInternal.currentUISourceCode() === location.uiSourceCode) {
+      const marker = frame?.textEditor.shadowRoot?.querySelector('.cm-executionLine');
+      const offset = frame ? TextEditor.ExecutionPositionHighlighter.getHighlightedPosition(frame.textEditor.state) : null;
+      // 반환 직후처럼 토큰이 없는 줄 끝도 에디터가 강조한 실제 위치로 확인한다.
+      if (frame && marker && offset !== null && this.sourcesViewInternal.currentUISourceCode() === location.uiSourceCode) {
         const editor = frame.textEditor.editor;
-        const offset = editor.posAtDOM(token, 0);
         const line = editor.state.doc.lineAt(offset);
         if (line.number - 1 === location.lineNumber && offset - line.from === (location.columnNumber ?? 0)) {
           if (scroll) {
@@ -950,7 +952,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
       }
       await new Promise(resolve => setTimeout(resolve, REPLAY_HIGHLIGHT_POLL_INTERVAL_MS));
     }
-    throw new Error('The process was restored, but the editor highlight did not become ready');
+    throw new Error('실행 위치는 복원했지만 소스 화면의 강조 표시가 준비되지 않았습니다.');
   }
 
   private async continueToLocation(uiLocation: Workspace.UISourceCode.UILocation): Promise<void> {

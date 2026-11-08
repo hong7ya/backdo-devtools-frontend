@@ -42,6 +42,23 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.strictEqual(model.debuggerPausedDetails()?.reason, Protocol.Debugger.PausedEventReason.XHR);
   });
 
+  it('일반 중단점이 없는 ESM 시작 위치도 프로세스의 시작 정지로 복원한다', async () => {
+    const {controller, model, script} = prepare('node');
+    const startReason = 'Break on start' as Protocol.Debugger.PausedEventReason;
+    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
+      locations: [{scriptId: script.scriptId, lineNumber: 1, columnNumber: 0}], getError: () => undefined,
+    });
+    controller.setCalibrationHandler(async () => 1);
+    controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/restarted');
+    controller.configure(async () => await pause(model, script, 0, startReason, []));
+    await pause(model, script, 0, startReason, []);
+    await pause(model, script, 1, Protocol.Debugger.PausedEventReason.Other, ['0']);
+    assert.isTrue(controller.canReverse(model));
+    await controller.reverse();
+    assert.isNull(controller.session.error);
+    assert.strictEqual(controller.currentPosition?.lineNumber, 0);
+  });
+
   it('같은 위치의 XHR 추가 정지는 표시하되 재실행 방문 횟수에 더하지 않는다', async () => {
     const prepared = prepare('node');
     const {controller, model, script} = prepared;
@@ -249,6 +266,9 @@ function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
   const target = createTarget();
   const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
   sinon.stub(model.agent, 'invoke_setPauseOnExceptions').resolves({getError: () => undefined});
+  sinon.stub(model.agent, 'invoke_setInstrumentationBreakpoint').resolves({
+    breakpointId: 'script-execution' as Protocol.Debugger.BreakpointId, getError: () => undefined,
+  });
   const scriptId = 'script' as Protocol.Runtime.ScriptId;
   const expression = 'debugger;\nconst value = 1;';
   const url = (kind === 'node' ? 'file:///user-cli.js' : '') as SDK.Script.Script['sourceURL'];

@@ -77,12 +77,12 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.lengthOf(controller.session.history, 0);
   });
 
-  it('사용자 대기는 기록을 유지하고 예상 복원이 3초에 도달하면 기록 전체를 종료한다', async () => {
+  it('사용자 대기는 기록을 유지하고 예상 CDP 처리가 3초에 도달하면 기록 전체를 종료한다', async () => {
     const clock = sinon.useFakeTimers();
     try {
       const prepared = prepare('node');
       const {controller, model, script} = prepared;
-      await calibrate(prepared);
+      await calibrate(prepared, 1500);
       sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
       await clock.tickAsync(60_000);
       assert.isNull(controller.session.error);
@@ -91,7 +91,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       await model.resume();
       await clock.tickAsync(2600);
       await pause(model, script, 1);
-      assert.include(controller.session.error ?? '', '예상 복원 시간이 3초');
+      assert.include(controller.session.error ?? '', '예상 CDP 처리 시간이 3초');
       assert.isFalse(controller.canReverse(model));
       assert.lengthOf(controller.session.history, 0);
       assert.strictEqual(controller.recordingUsage.breakpoints, 0);
@@ -101,13 +101,42 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     }
   });
 
-  it('최초 측정만으로 3초가 걸리면 진행 기록을 해제하고 재측정을 반복하지 않는다', async () => {
+  it('최초 왕복 측정값이 3초면 진행 기록을 해제하고 재측정을 반복하지 않는다', async () => {
     const prepared = prepare('node');
     await calibrate(prepared, 3000);
-    assert.include(prepared.controller.session.error ?? '', '예상 복원 시간이 3초');
-    assert.isFalse(prepared.controller.canCalibrate(prepared.model));
+    assert.include(prepared.controller.session.error ?? '', '예상 CDP 처리 시간이 3초');
+    assert.isFalse(prepared.controller.calibrating);
     assert.isFalse(prepared.controller.canReverse(prepared.model));
     assert.lengthOf(prepared.controller.session.history, 0);
+  });
+
+  it('더미 측정 중에도 Step을 허용하고 교체된 세션에는 늦은 측정 결과를 적용하지 않는다', async () => {
+    const {controller, model, script, target} = prepare('node');
+    const restart = sinon.stub().resolves('ws://127.0.0.1:9229/new');
+    const disconnect = sinon.spy(target.router()!.connection(), 'disconnect');
+    const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    let finish: (ms: number) => void = () => {};
+    let signal: AbortSignal|undefined;
+    controller.setRestartHandler(restart);
+    controller.setCalibrationHandler(cancellation => {
+      signal = cancellation;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    await pause(model, script, 0);
+    assert.isTrue(controller.calibrating);
+    assert.isFalse(controller.busy);
+    await model.stepInto();
+    sinon.assert.calledOnce(resume);
+    await pause(model, script, 1);
+    assert.lengthOf(controller.session.history, 2);
+    model.globalObjectCleared();
+    assert.isTrue(signal?.aborted);
+    finish(1);
+    await Promise.resolve();
+    assert.isFalse(controller.calibrated);
+    assert.isNull(controller.estimatedReplayMs);
+    sinon.assert.notCalled(restart);
+    sinon.assert.notCalled(disconnect);
   });
 
   it('실행 컨텍스트가 교체되면 이전 입력과 위치를 비우고 새 기록을 받는다', () => {
@@ -180,13 +209,12 @@ function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
 
 async function calibrate(
     {controller, model, script, target}: Pick<ReturnType<typeof prepare>, 'controller'|'model'|'script'|'target'>,
-    elapsedMs = 400): Promise<void> {
+    roundTripMs = 1): Promise<void> {
   controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
   sinon.stub(target.router()!.connection(), 'disconnect').resolves();
   controller.configure(async () => await pause(model, script, 0));
+  controller.setCalibrationHandler(async () => roundTripMs);
   await pause(model, script, 0);
-  await controller.calibrate();
-  controller.recordReplayDuration(elapsedMs);
 }
 
 function recordConsoleCommand(target: SDK.Target.Target, expression: string): void {

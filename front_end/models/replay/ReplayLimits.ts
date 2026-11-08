@@ -2,11 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// 제품 기준: 뒤로가기 클릭부터 최종 화면 표시까지 3초 미만. 최초 실측 전에는 예상 시간을 만들지 않는다.
+// 3초는 사용자가 정한 대기 기준이다. 더미 CDP 왕복 × 기록 개수에 적용하는 사전 제한이며,
+// 사용자 코드 실행·재시작·화면 비용을 포함한 실제 복원 완료 시간의 보장값은 아니다.
 export const REPLAY_RESPONSE_BUDGET_MS = 3_000;
 
 export const REPLAY_TIME_LIMIT_MESSAGE =
-    '예상 복원 시간이 3초에 도달해 빠른 뒤로가기를 위한 기록을 종료했습니다. 디버깅 세션을 다시 시작하고, ' +
+    '예상 CDP 처리 시간이 3초에 도달해 빠른 뒤로가기를 위한 기록을 종료했습니다. 디버깅 세션을 다시 시작하고, ' +
     '입력 데이터나 반복 횟수를 줄여 원하는 위치까지 이동해 주세요.';
 
 /**
@@ -16,7 +17,7 @@ export const REPLAY_TIME_LIMIT_MESSAGE =
  */
 export const REPLAY_LIMITS = Object.freeze({
   // Chrome 156·macOS arm64에서 10만 위치의 배열은 약 3.11MiB, 복원 계획 포함 약 3.49MiB였다.
-  // 이 값은 최후의 메모리 보호 상한이다. 실제 기록은 기기별 예상 복원 시간 3초에서도 종료한다.
+  // 이 값은 최후의 메모리 보호 상한이다. 실제 기록은 기기별 예상 CDP 처리 시간 3초에서도 종료한다.
   // 측정 조건과 제외 비용: scripts/backdo/README.md의 "측정 결과".
   positions: 100_000,
   // 정지 위치가 없는 준비 코드도 누적되므로 입력 개수를 별도로 제한한다.

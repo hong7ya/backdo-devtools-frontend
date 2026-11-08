@@ -10,22 +10,6 @@ describe('재실행 세션', () => {
     position: {url: 'file:///entry.js', hash: 'v1', lineNumber, columnNumber: 0}, depth, userVisible,
   });
 
-  it('최초 측정은 같은 정지 위치로 복원하고 이력을 하나로 유지한다', () => {
-    const session = new ReplaySession();
-    session.recordPause(pause(0, 1, true));
-    assert.isTrue(session.canCalibrate);
-    assert.deepEqual(session.beginCalibration(), pause(0).position);
-    assert.isFalse(session.canCalibrate);
-    assert.throws(() => session.beginExecution('resume'), /in progress/);
-    assert.strictEqual(session.recordPause(pause(0, 1, true)), 'show');
-    assert.lengthOf(session.history, 1);
-    assert.isFalse(session.canReverse);
-    session.beginExecution('step-into');
-    session.recordPause(pause(1));
-    assert.isFalse(session.canCalibrate);
-    assert.isTrue(session.canReverse);
-  });
-
   it('Resume 중간 위치를 기록하고 복원할 때 최종 정지만 화면에 전달한다', () => {
     const session = new ReplaySession();
     assert.strictEqual(session.recordPause(pause(0, 1, true)), 'show');

@@ -36,9 +36,22 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   let browser: Browser|undefined;
   let temporaryDirectory: string|undefined;
   let beforeRestart: (() => Promise<void>)|undefined;
+  let beforeCalibration: ((page: Page) => Promise<void>)|undefined;
+  const calibrationProcesses = new Map<string, TestTarget>();
+  const calibrationReports: object[] = [];
+
+  after(async () => {
+    if (process.env.BACKDO_CALIBRATION_REPORT) {
+      await writeFile(process.env.BACKDO_CALIBRATION_REPORT, JSON.stringify(calibrationReports, null, 2));
+    }
+  });
 
   afterEach(async () => {
     await browser?.close();
+    for (const process of calibrationProcesses.values()) {
+      await process.close();
+    }
+    calibrationProcesses.clear();
     await target?.close();
     await server?.close();
     if (temporaryDirectory) {
@@ -49,6 +62,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     server = undefined;
     temporaryDirectory = undefined;
     beforeRestart = undefined;
+    beforeCalibration = undefined;
   });
 
   for (const kind of ['node', 'page'] as const) {
@@ -70,7 +84,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         const next = await session.page.evaluate(() => window.backdoTest.previous());
         await reverseAndVerify(session.page, next);
 
-        assert.strictEqual(session.restartCount(), 3, '최초 측정 한 번과 뒤로가기 두 번만 재시작해야 한다');
+        assert.strictEqual(session.restartCount(), 2, '사용자가 요청한 뒤로가기 두 번만 재시작해야 한다');
         assert.strictEqual(session.documentRequests(), 1, '문서 전체를 다시 불러오지 않아야 한다');
         assert.deepEqual(session.pageErrors, [], '브라우저에서 처리되지 않은 오류가 없어야 한다');
       }).timeout(60_000);
@@ -106,7 +120,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isTrue(await reverseDisabled(session.page));
   }).timeout(60_000);
 
-  it('예측하지 못한 긴 복원에서도 로딩·패널 이동을 유지하고 이후 기록은 종료한다', async () => {
+  it('긴 복원에서도 로딩·패널 이동을 유지하고 CDP 비용에는 실제 실행 시간을 섞지 않는다', async () => {
     let releaseRestart: (() => void)|undefined;
     const gate = new Promise<void>(resolve => { releaseRestart = resolve; });
     const session = await openSession('node', 'for.js');
@@ -140,35 +154,60 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       releaseRestart?.();
     }
     await waitForReplay(session.page, previous.length);
-    assert.include((await session.page.evaluate(() => window.backdoTest.snapshot())).error ?? '', '예상 복원 시간이 3초');
-    assert.isTrue(await reverseDisabled(session.page));
-    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), 0);
+    const restored = await session.page.evaluate(() => window.backdoTest.snapshot());
+    assert.isNull(restored.error);
+    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), previous.length - 1);
+    assert.isBelow(restored.estimatedReplayMs ?? Infinity, 3000);
     assert.isNull(await session.page.$(LOADING));
     assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
 
-  it('최초 복원 측정이 3초를 넘으면 같은 위치에 도착한 뒤 기록을 종료한다', async () => {
-    beforeRestart = async () => await new Promise(resolve => setTimeout(resolve, 3100));
-    const session = await openSession('node', 'for.js');
-    const snapshot = await session.page.evaluate(() => window.backdoTest.snapshot());
-    assert.include(snapshot.error ?? '', '예상 복원 시간이 3초');
-    assert.strictEqual(session.restartCount(), 1);
-    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), 0);
-    assert.isTrue(await reverseDisabled(session.page));
-    assert.isNull(await session.page.$(LOADING));
-    await session.page.waitForSelector('pierce/[aria-label="Resume script execution"]', {visible: true});
+  it('더미 측정은 콘솔 준비 코드의 외부 요청을 반복하지 않고 Resume·Step도 막지 않는다', async () => {
+    beforeCalibration = async page => {
+      await page.waitForSelector(LOADING, {visible: true});
+      assert.isFalse(await page.evaluate(() => document.body.inert));
+      for (const label of ['Resume script execution', 'Step over next function call']) {
+        const button = await page.waitForSelector(`pierce/[aria-label="${label}"]`, {visible: true});
+        assert.isFalse(await button?.evaluate(element => element.shadowRoot?.querySelector('button')?.disabled));
+      }
+    };
+    const session = await openSession(
+        'page', 'for.js', true, 'console', 'globalThis.seed = 2; await fetch("BACKDO_ORIGIN/effect");');
+    assert.strictEqual(server?.effectCount(), 1, '측정을 위해 준비 코드를 다시 실행하면 외부 요청도 늘어난다');
+    assert.strictEqual(session.restartCount(), 0);
+    assert.isTrue(await session.page.evaluate(() => window.backdoTest.isPaused()));
+    assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
 
-  it('최초 측정의 재시작이 실패하면 재시도를 반복하지 않고 이유를 표시한다', async () => {
-    beforeRestart = async () => {
-      throw new Error('테스트 대상의 재시작 실패');
+  it('더미 생성 실패 시 자원을 정리하고 사용자 연결과 정지는 유지한다', async () => {
+    beforeCalibration = async () => {
+      throw new Error('테스트 더미 준비 실패');
     };
     const session = await openSession('node', 'for.js');
-    assert.strictEqual(session.restartCount(), 1);
+    assert.strictEqual(session.restartCount(), 0);
+    assert.strictEqual(calibrationProcesses.size, 0);
+    assert.isTrue(await session.page.evaluate(() => window.backdoTest.isPaused()));
     const button = await session.page.$(REVERSE_BUTTON);
-    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '재시작 실패');
+    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '더미 준비 실패');
     assert.isTrue(await reverseDisabled(session.page));
     assert.isNull(await session.page.$(LOADING));
+  }).timeout(60_000);
+
+  it('더미 CDP 연결 실패도 더미만 정리하고 사용자 디버깅을 유지한다', async () => {
+    beforeCalibration = async () => {
+      for (const dummy of calibrationProcesses.values()) {
+        await dummy.close();
+      }
+    };
+    const session = await openSession('node', 'for.js');
+    assert.strictEqual(session.restartCount(), 0);
+    assert.strictEqual(calibrationProcesses.size, 0);
+    assert.isTrue(await session.page.evaluate(() => window.backdoTest.isPaused()));
+    const button = await session.page.$(REVERSE_BUTTON);
+    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), 'CDP 연결');
+    assert.isTrue(await reverseDisabled(session.page));
+    assert.isNull(await session.page.$(LOADING));
+    assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
 
   it('소스가 바뀌면 복원을 실패 처리하고 뒤로가기 버튼을 비활성화한다', async () => {
@@ -227,17 +266,54 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     page.on('pageerror', error => pageErrors.push(error.message));
     let connectedWS = target.session.ws;
     let restartCount = 0;
-    const calibration: {position: HistorySnapshot['target']|null} = {position: null};
+    let calibrationCount = 0;
+    let disposedCalibrationCount = 0;
+    const calibration: {position: HistorySnapshot['target']|null, pid?: number, port?: number, visiblePauses?: number} = {position: null};
+    await page.exposeFunction('createBackDoCalibrationProcess', async (requestedKind: 'node'|'page') => {
+      assert.strictEqual(requestedKind, kind);
+      calibrationCount++;
+      const before = await page.evaluate(() => window.backdoTest.snapshot());
+      calibration.position = before.position;
+      calibration.visiblePauses = before.visiblePauses.length;
+      const dummyEntry = path.join(path.dirname(entry), 'calibration.js');
+      await writeFile(dummyEntry, 'setInterval(() => {}, 1000);');
+      const dummy = kind === 'node' ? new NodeTestTarget({entry: dummyEntry, output: null, pauseOnStart: false}) :
+                                    new BrowserTestTarget(new URL(page.url()).origin);
+      try {
+        await dummy.start();
+        const {ws, pid, port} = dummy.session;
+        calibration.pid = pid;
+        calibration.port = port;
+        assert.notStrictEqual(pid, currentTarget().session.pid, '실제 별도 OS 프로세스여야 한다');
+        assert.notStrictEqual(port, currentTarget().session.port, '사용자 연결 포트를 공유하지 않아야 한다');
+        calibrationProcesses.set(ws, dummy);
+        await beforeCalibration?.(page);
+        return ws;
+      } catch (error) {
+        for (const [ws, owned] of calibrationProcesses) {
+          if (owned === dummy) {
+            calibrationProcesses.delete(ws);
+          }
+        }
+        await dummy.close();
+        throw error;
+      }
+    });
+    await page.exposeFunction('disposeBackDoCalibrationProcess', async (ws: string) => {
+      const dummy = calibrationProcesses.get(ws);
+      if (dummy) {
+        await dummy.close();
+        calibrationProcesses.delete(ws);
+        disposedCalibrationCount++;
+        if (calibration.pid) {
+          assert.throws(() => process.kill(calibration.pid ?? 0, 0), /ESRCH/, '더미 프로세스가 종료되어야 한다');
+        }
+      }
+    });
     await page.exposeFunction('restartBackDoTestTarget', async (address: {ws: string, kind: string}) => {
       assert.strictEqual(address.kind, kind);
       assert.strictEqual(address.ws, connectedWS);
       restartCount++;
-      if (restartCount === 1) {
-        calibration.position = (await page.evaluate(() => window.backdoTest.snapshot())).position;
-        const loading = await page.waitForSelector(LOADING, {visible: true});
-        assert.include(await loading?.evaluate(element => element.textContent), '측정 중');
-        assert.isTrue(await reverseDisabled(page));
-      }
       await beforeRestart?.();
       connectedWS = (await currentTarget().restart()).ws;
       return connectedWS;
@@ -260,7 +336,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         await target.navigate(`${server.origin}/fixture.html`);
       } else {
         if (setup) {
-          await enterConsoleCode(page, setup);
+          await enterConsoleCode(page, setup.replace('BACKDO_ORIGIN', server.origin));
           await page.waitForSelector('pierce/.console-user-command-result', {visible: true});
         }
         await enterConsoleCode(page, source);
@@ -272,23 +348,39 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       if (!snapshot.error) {
         assert.isTrue(snapshot.calibrated);
         assert.isAbove(snapshot.estimatedReplayMs ?? 0, 0);
-        assert.strictEqual(restartCount, 1);
+        assert.strictEqual(restartCount, 0);
+        assert.strictEqual(calibrationCount, 1);
+        assert.strictEqual(disposedCalibrationCount, 1);
+        assert.strictEqual(calibrationProcesses.size, 0);
         assert.strictEqual(await page.evaluate(() => window.backdoTest.historyLength()), 1);
         const initialPosition = calibration.position;
         if (!initialPosition) {
           assert.fail('측정 전 최초 정지 위치를 확인할 수 있어야 한다');
         }
         assert.deepEqual(snapshot.position, initialPosition, '측정 후 최초 정지 위치를 유지해야 한다');
-        assert.deepEqual(snapshot.highlight, [initialPosition.lineNumber, initialPosition.columnNumber]);
-        assert.notStrictEqual(currentTarget().session.pid, initialTarget.pid);
-        assert.notStrictEqual(currentTarget().session.ws, initialTarget.ws);
+        await page.waitForFunction(() => window.backdoTest.snapshot().highlight !== null, {timeout: UI_TIMEOUT_MS});
+        const rendered = await page.evaluate(() => window.backdoTest.snapshot());
+        assert.deepEqual(rendered.highlight, [initialPosition.lineNumber, initialPosition.columnNumber]);
+        assert.lengthOf(snapshot.visiblePauses, calibration.visiblePauses ?? 0, '측정 때문에 사용자 정지가 추가되면 안 된다');
+        assert.deepEqual(snapshot.transitions, [], '측정 중에는 사용자 화면 전환이 없어야 한다');
+        assert.strictEqual(currentTarget().session.pid, initialTarget.pid);
+        assert.strictEqual(currentTarget().session.ws, initialTarget.ws);
         assert.strictEqual(currentTarget().session.port, initialTarget.port);
         assert.isTrue(snapshot.sameDocument);
         assert.isNull(await page.$(LOADING));
+        calibrationReports.push({
+          kind, input, userPID: initialTarget.pid, userPIDAfter: currentTarget().session.pid,
+          userWS: initialTarget.ws, userWSAfter: currentTarget().session.ws,
+          dummyPID: calibration.pid, dummyPort: calibration.port, userPort: initialTarget.port,
+          userRestarts: restartCount, dummyCreated: calibrationCount, dummyDisposed: disposedCalibrationCount,
+          roundTripMs: snapshot.estimatedReplayMs, position: snapshot.position, transitions: snapshot.transitions,
+          externalRequests: server?.effectCount(),
+        });
       }
     } else {
       await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
       assert.strictEqual(restartCount, 0);
+      assert.strictEqual(calibrationCount, 0);
       assert.isFalse((await page.evaluate(() => window.backdoTest.snapshot())).calibrated);
     }
     assert.isTrue(await reverseDisabled(page));
@@ -368,6 +460,14 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isNull(await page.$(LOADING));
     assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')),
         `실행 위치 ${(previous.length - 1).toLocaleString('ko-KR')} /`);
+    assert.closeTo(
+        result.estimatedReplayMs ?? Infinity,
+        (initialState.estimatedReplayMs ?? 0) * (previous.length - 1) / previous.length, 0.000001,
+        '버린 미래 기록만큼 예상 CDP 비용도 줄어야 한다');
+    calibrationReports.push({
+      action: 'reverse', recordsBefore: previous.length, recordsAfter: previous.length - 1,
+      estimatedCDPMs: initialState.estimatedReplayMs, actualRestoreMs: elapsedMs,
+    });
     assert.deepEqual(result.position, previous.target);
     assert.deepEqual(result.highlight, [previous.target.lineNumber, previous.target.columnNumber]);
     assert.deepEqual(result.messages, []);

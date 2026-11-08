@@ -456,3 +456,43 @@ describe('DebuggerModel', () => {
     });
   });
 });
+
+describeWithMockConnection('DebuggerModel replay interception', () => {
+  it('hides internal pause/resume pairs before bindings or UI receive them', async () => {
+    const model = createTarget().model(SDK.DebuggerModel.DebuggerModel)!;
+    const paused = sinon.spy();
+    const resumed = sinon.spy();
+    const beforePaused = sinon.stub().resolves(true);
+    model.addEventListener(SDK.DebuggerModel.Events.DebuggerPaused, paused);
+    model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, resumed);
+    model.setBeforePausedCallback(beforePaused);
+    model.setPauseInterceptor(async () => {
+      // A resumed event can arrive before the asynchronous interceptor returns.
+      model.resumedScript();
+      return true;
+    });
+    await model.pausedScript([], Protocol.Debugger.PausedEventReason.Other, undefined, []);
+    sinon.assert.notCalled(paused);
+    sinon.assert.notCalled(resumed);
+    sinon.assert.notCalled(beforePaused);
+    model.setPauseInterceptor(async () => false);
+    await model.pausedScript([], Protocol.Debugger.PausedEventReason.Other, undefined, []);
+    model.resumedScript();
+    sinon.assert.calledOnce(paused);
+    sinon.assert.calledOnce(resumed);
+    sinon.assert.calledOnce(beforePaused);
+  });
+
+  it('preserves native Resume when no execution interceptor handles the command', () => {
+    const model = createTarget().model(SDK.DebuggerModel.DebuggerModel)!;
+    const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    const intercept = sinon.stub().returns(true);
+    model.setExecutionInterceptor(intercept);
+    model.resume();
+    sinon.assert.calledWithExactly(intercept, 'resume');
+    sinon.assert.notCalled(resume);
+    model.setExecutionInterceptor(null);
+    model.resume();
+    sinon.assert.calledOnce(resume);
+  });
+});

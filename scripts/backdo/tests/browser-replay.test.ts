@@ -343,10 +343,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     server = await serveTestFrontend(source);
     const serverDirectory = process.env.BACKDO_SERVER_DIR || path.resolve(process.cwd(), '../server');
     const {startServer} = require(path.join(serverDirectory, 'app.js'));
-    application = await startServer({port: 0, frontendDir: process.env.BACKDO_FRONTEND_DIR});
+    application = await startServer({port: 0});
     if (!application) {
       throw new Error('실제 BackDo 서버를 시작하지 못했습니다.');
     }
+    assert.notStrictEqual(server.origin, application.origin, '화면과 프로세스 제어 API는 다른 주소에서 제공해야 한다');
     let initialTarget: {ws: string, pid: number, port: number};
     if (kind === 'node') {
       target = new NodeTestTarget({
@@ -374,7 +375,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     page.on('pageerror', error => pageErrors.push(error.message));
     const registered = new Promise<void>(resolve => {
       page.on('response', response => {
-        if (response.url() === `${application?.origin}/sessions` && response.ok()) {
+        if (response.request().method() === 'POST' && response.url() === `${application?.origin}/sessions` && response.ok()) {
           void response.json().then(result => { currentSessionId = result.id; resolve(); });
         }
       });
@@ -386,11 +387,15 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         if (request.method() === 'POST' && request.url().includes('/calibrations/')) {await beforeCalibration?.(page);}
         await request.continue();
       })().catch(async error => {
-        await request.respond({status: 400, contentType: 'application/json', body: JSON.stringify({error: error.message})});
+        await request.respond({
+          status: 400, contentType: 'application/json',
+          headers: {'Access-Control-Allow-Origin': server?.origin ?? ''},
+          body: JSON.stringify({error: error.message}),
+        });
       });
     });
     const entrypoint = kind === 'node' ? 'js_app.html' : input === 'page' ? 'inspector.html' : 'devtools_app.html';
-    const url = new URL(`/gen/front_end/${entrypoint}`, application.origin);
+    const url = new URL(`/${entrypoint}`, server.origin);
     url.searchParams.set('backdoServer', withRestart ? application.origin : 'http://127.0.0.1:1');
     if (kind === 'node' && fixture === 'for.js' && withRestart) {
       url.searchParams.set('port', String(initialTarget.port));
@@ -398,7 +403,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       url.searchParams.set('ws', initialTarget.ws.replace(/^ws:\/\//, ''));
     }
     await page.goto(url.href, {waitUntil: 'domcontentloaded'});
-    await page.addScriptTag({type: 'module', url: `${application.origin}/gen/front_end/models/replay/ReplayTestHarness.js`});
+    await page.addScriptTag({type: 'module', url: `${server.origin}/models/replay/ReplayTestHarness.js`});
     await page.waitForFunction(() => window.backdoTest?.ready(), {timeout: UI_TIMEOUT_MS});
     if (withRestart) {await registered;}
     if (kind === 'page') {

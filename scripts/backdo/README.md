@@ -6,12 +6,13 @@ BackDo는 빌드된 `devtools-frontend` 웹 화면이다. 실행 위치의 순�
 
 **이번 변경은 아직 `backdo.site`에 배포되지 않았다. 아래 로컬 빌드 주소로 확인한다.** URL 단위 테스트의 `backdo.test`는 해석용 문자열이며 네트워크 요청을 하지 않는다.
 
-프런트엔드와 형제 디렉터리의 `server`를 함께 사용한다. 두 저장소 모두 `.nvmrc`의 Node 22.11.0을 사용한다.
+프런트엔드는 이 저장소에서 독립적으로 빌드·배포한다. 프로세스 재시작 API는 별도의 `server`에서 실행한다. 두 저장소 모두 `.nvmrc`의 Node 22.11.0을 사용한다.
 
 ```sh
 # devtools-frontend에서
 nvm use
 npm run build
+python3 -m http.server 8000 --bind 127.0.0.1
 
 # 별도 터미널의 server에서
 nvm use
@@ -19,12 +20,12 @@ npm ci
 npm start
 ```
 
-- **기존 콘솔 사용:** server 디렉터리의 다른 터미널에서 `npm run ws`를 실행한다. 출력된 `devtools_app.html?ws=...` 주소를 열고 Console에 `debugger;`와 코드를 입력한다.
-- **Node 사용:** 사용자가 자신의 터미널에서 `node --inspect-brk <cli.js> [인자...]`를 실행한다. `http://127.0.0.1:3000/gen/front_end/js_app.html?port=9229`를 연다. 파일 경로나 실행 명령을 BackDo에 전달하지 않는다.
+- **기존 콘솔 사용:** server 디렉터리의 다른 터미널에서 `npm run ws`를 실행한다. 출력된 `?ws=...&backdoServer=...`를 `http://127.0.0.1:8000/out/Default/gen/front_end/devtools_app.html` 뒤에 붙여 연다. Console에 `debugger;`와 코드를 입력한다.
+- **Node 사용:** 사용자가 자신의 터미널에서 `node --inspect-brk <cli.js> [인자...]`를 실행한다. `http://127.0.0.1:8000/out/Default/gen/front_end/js_app.html?port=9229`를 연다. 파일 경로나 실행 명령을 BackDo에 전달하지 않는다.
 - **기존 Node 주소:** `/json/list`에서 얻은 `js_app.html?ws=127.0.0.1:9229/<ID>`도 지원한다.
 - **웹페이지:** 서버가 생성한 브라우저의 ws로 `inspector.html?ws=...`에 연결한다. 대상 페이지로 이동한 뒤 같은 공통 복원 엔진을 사용한다.
 
-서버는 기본적으로 형제 저장소의 `out/Default/gen/front_end`를 `/gen/front_end`에서 제공한다. 별도 경로는 `BACKDO_FRONTEND_DIR`, 서버 포트는 `BACKDO_SERVER_PORT`로 지정한다. 기본 3000이 아닌 서버를 사용하면 화면 주소에 `backdoServer=http://127.0.0.1:<서버 포트>`를 붙인다.
+8000은 사용자가 여는 화면 포트의 예시다. 프런트엔드의 정적 서버나 배포 위치는 자유롭게 선택한다. API 서버는 프런트엔드 파일을 제공하지 않는다. API 포트는 `BACKDO_SERVER_PORT`로 지정하며, 기본 3000이 아닌 API를 사용하면 화면 주소에 `backdoServer=http://127.0.0.1:<서버 포트>`를 붙인다.
 
 | 입력·동작 | 실제 연동 |
 | --- | --- |
@@ -36,7 +37,7 @@ npm start
 
 `LocalTargetLifecycle`이 실제 HTTP 연결을 맡고 `ReplayConnection`·`ReplayController`는 콘솔·Node·inspector가 공유한다. 통합 테스트도 제품의 서버 API를 호출하며 테스트용 lifecycle을 주입하지 않는다. 포트만으로 브라우저 JavaScript가 OS 프로세스를 제어할 수는 없으므로 로컬 서버가 필요하다.
 
-배포된 `backdo.site`도 새 프런트엔드를 배포한 뒤 같은 서버에 연결할 수 있다. 이 작업은 로컬 코드 변경이며 운영 사이트 배포는 포함하지 않는다. [Chrome의 로컬 네트워크 접근 권한](https://developer.chrome.com/blog/local-network-access)이 필요한 환경에서는 허용해야 한다. 위 로컬 주소로 열면 화면과 서버가 같은 출처다.
+화면을 별도로 배포할 때는 API 서버의 `BACKDO_ALLOWED_ORIGINS`에 배포 출처를 추가할 수 있다. 이 작업에는 운영 사이트 배포가 포함되지 않는다. [Chrome의 로컬 네트워크 접근 권한](https://developer.chrome.com/blog/local-network-access)이 필요한 환경에서는 허용해야 한다. 로컬 개발에서도 화면과 API는 다른 출처이며, 서버가 로컬 화면의 API 접근을 허용한다.
 
 ## Node 실행 정보의 보존 범위
 
@@ -170,7 +171,7 @@ npm test -- --skip-ninja front_end/models/replay front_end/core/sdk/DebuggerMode
 npm test -- --skip-ninja scripts/backdo/tests
 ```
 
-통합 테스트 전 형제 `server`에서 `npm ci`를 실행한다. 다른 서버 저장소 경로는 `BACKDO_SERVER_DIR`로 지정한다. 테스트는 저장소 Chrome for Testing 경로를 기본으로 사용한다. 다른 Chrome은 `CHROME_BIN`, 별도 빌드 화면은 `BACKDO_FRONTEND_DIR`로 지정한다. 제품 사용을 위해 테스트 도우미를 실행할 필요는 없다.
+통합 테스트 전 형제 `server`에서 `npm ci`를 실행한다. 다른 서버 저장소 경로는 `BACKDO_SERVER_DIR`로 지정한다. 테스트는 화면과 API를 서로 다른 임시 포트에서 제공한다. 저장소 Chrome for Testing 경로를 기본으로 사용하며 다른 Chrome은 `CHROME_BIN`으로 지정한다. `BACKDO_FRONTEND_DIR`는 테스트용 정적 서버가 읽을 빌드 폴더를 지정하는 환경변수다. 제품 API 서버의 설정이 아니다. 제품 사용을 위해 테스트 도우미를 실행할 필요는 없다.
 
 개발 검증은 변경 TS를 별도 화면 디렉터리에 컴파일하여 수행했다. 프런트엔드 Mocha·Chai 단위 테스트 55개, 실제 화면 통합 테스트 12개, 서버 Mocha·Chai 테스트 6개가 통과했다. 서버 실행 파일과 기존 ws·close 명령의 실행도 확인했다. 변경 파일 ESLint, Node 테스트 TypeScript, GN 의존성과 GRD 리소스 검사도 통과했다. 실제 Node·브라우저 콘솔·inspector 경로에서 더미와 사용자의 PID·포트가 다르고, 측정 후 사용자 PID·WebSocket·위치·문서가 유지되는지 확인한다. 콘솔 준비 코드의 외부 요청이 측정 때문에 반복되지 않는지도 확인한다. `for`·`async/await`·`for...of`·연속 뒤로가기·화면 전환 검증은 유지한다. 실패·늦은 취소·3초 기준의 기록 해제도 별도로 검사한다.
 

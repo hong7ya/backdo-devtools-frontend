@@ -36,6 +36,8 @@ interface RecordedScript {
   debuggerStatements: Set<string>;
 }
 
+class ScriptUnavailableError extends Error {}
+
 export const enum Events {
   CHANGED = 'Changed',
   RECORDING_CHANGED = 'RecordingChanged',
@@ -505,7 +507,15 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#scriptExecutionBreakpoint = response.breakpointId;
     // 이미 불러온 모듈은 최초 정지에서, 나중에 불러오는 모듈은 실행 직전에 준비한다.
     for (const script of model.scripts()) {
-      await this.#recordedScript(script);
+      try {
+        await this.#recordedScript(script);
+      } catch (error) {
+        // 소스 목록에는 V8이 이미 해제한 스크립트도 남는다. 과거 소스 준비에서만 건너뛴다.
+        // 현재 정지·실행 직전 소스의 실패는 각 호출 경로에서 그대로 처리한다.
+        if (!(error instanceof ScriptUnavailableError)) {
+          throw error;
+        }
+      }
     }
   }
 
@@ -527,8 +537,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       end: {scriptId: script.scriptId, lineNumber: script.endLine, columnNumber: script.endColumn},
       restrictToFunction: false,
     });
-    if (result.getError()) {
-      throw new Error(result.getError());
+    const error = result.getError();
+    if (error === 'Script not found') {
+      throw new ScriptUnavailableError(error);
+    }
+    if (error) {
+      throw new Error(error);
     }
     const positions = new Set<string>();
     const debuggerStatements = new Set<string>();

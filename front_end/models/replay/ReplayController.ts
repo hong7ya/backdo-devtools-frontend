@@ -363,6 +363,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   #identifyConsoleSource(script: SDK.Script.Script): void {
+    if (isInternalScript(script)) {
+      return;
+    }
     const index = this.#activeConsoleInput;
     if (index === null) {
       return;
@@ -476,6 +479,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #recordedScript(script: SDK.Script.Script): Promise<RecordedScript|null> {
+    if (isInternalScript(script)) {
+      return null;
+    }
     const recorded = this.#scripts.get(script.scriptId);
     if (recorded) {
       return recorded;
@@ -587,7 +593,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       // 시작 정지가 Ignore List의 모듈에 있어도 재시작의 기준점으로만 보관한다.
       const breakOnStart = String(details.reason) === 'Break on start';
       let script = frame && await this.#recordedScript(frame.script);
-      if (!script && frame && breakOnStart) {
+      if (!script && frame && breakOnStart && !isInternalScript(frame.script)) {
         script = {url: frame.script.sourceURL, positions: new Set(), debuggerStatements: new Set()};
       }
       if (generation !== this.#replayGeneration || this.session.error) {
@@ -737,4 +743,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #notifyStatusChanged(): void {
     this.dispatchEventToListeners(Events.CHANGED);
   }
+}
+
+/** 서버와 프론트가 공유하는 내부 소스 이름이다. 파일명·실행 완료 여부로 사용자 코드를 제외하지 않는다. */
+function isInternalScript(script: SDK.Script.Script): boolean {
+  return script.sourceURL.startsWith('backdo-internal:///');
 }

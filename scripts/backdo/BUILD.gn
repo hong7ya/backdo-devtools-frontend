@@ -13,6 +13,7 @@ copy_to_gen("fixtures") {
   sources = [
     "fixtures/async-await.js",
     "fixtures/breakpoints.js",
+    "fixtures/completed-source.js",
     "fixtures/fetch.js",
     "fixtures/for-of-break.js",
     "fixtures/for.js",

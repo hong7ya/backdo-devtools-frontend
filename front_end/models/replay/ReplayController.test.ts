@@ -55,6 +55,25 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     });
   }
 
+  it('BackDo 내부 소스는 최초 목록과 실행 직전 모두 중단점을 조회하지 않는다', async () => {
+    const prepared = prepare('node');
+    const {controller, model, script} = prepared;
+    const internal = new SDK.Script.Script(
+        model, 'internal' as Protocol.Runtime.ScriptId,
+        'backdo-internal:///restore-launch-context.js' as SDK.Script.Script['sourceURL'],
+        0, 0, 1, 16, 1, 'internal-hash', false, false, undefined, true, 24, null, null, null, null, null, null);
+    sinon.stub(model, 'scripts').returns([internal, script]);
+    await calibrate(prepared);
+    const usage = controller.recordingUsage;
+    (model.scriptForId as sinon.SinonStub).returns(internal);
+    sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    await model.pausedScript([], Protocol.Debugger.PausedEventReason.Instrumentation, {scriptId: internal.scriptId}, []);
+    const requests = (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).getCalls();
+    assert.isFalse(requests.some(call => call.args[0].start.scriptId === internal.scriptId));
+    assert.deepEqual(controller.recordingUsage, usage);
+    assert.isNull(controller.session.error);
+  });
+
   it('현재 정지한 스크립트가 없다는 응답은 기록 실패로 알린다', async () => {
     const {controller, model, script} = prepare('node');
     sinon.stub(model, 'scripts').returns([script]);

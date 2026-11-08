@@ -29,6 +29,51 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.include(controller.status, '재시작 연동');
   });
 
+  for (const kind of ['node', 'page'] as const) {
+    it(`${kind === 'node' ? 'Node' : '콘솔'}에서 이미 해제된 소스가 목록에 남아 있어도 기록과 복원을 유지한다`, async () => {
+      const prepared = prepare(kind);
+      const {controller, model, script, target, expression} = prepared;
+      const expired = new SDK.Script.Script(
+          model, 'expired' as Protocol.Runtime.ScriptId, 'https://example.test/finished.js' as SDK.Script.Script['sourceURL'],
+          0, 0, 1, 16, 1, 'expired-hash', false, false, undefined, false, 24, null, null, null, null, null, null);
+      sinon.stub(model, 'scripts').returns([expired]);
+      (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub)
+          .withArgs(sinon.match({start: sinon.match({scriptId: expired.scriptId})}))
+          .resolves({getError: () => 'Script not found'});
+      if (kind === 'page') {
+        recordConsoleCommand(target, expression);
+        model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
+      }
+      await calibrate(prepared);
+      await pause(model, script, 1);
+      assert.isNull(controller.session.error);
+      assert.isTrue(controller.canReverse(model));
+      await controller.reverse();
+      assert.isNull(controller.session.error);
+      assert.strictEqual(controller.currentPosition?.lineNumber, 0);
+      assert.lengthOf(controller.session.history, 1);
+    });
+  }
+
+  it('현재 정지한 스크립트가 없다는 응답은 기록 실패로 알린다', async () => {
+    const {controller, model, script} = prepare('node');
+    sinon.stub(model, 'scripts').returns([script]);
+    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({getError: () => 'Script not found'});
+    await pause(model, script, 0);
+    assert.include(controller.session.error ?? '', 'Script not found');
+    assert.isFalse(controller.canReverse(model));
+    assert.lengthOf(controller.session.history, 0);
+  });
+
+  it('과거 소스를 준비하더라도 스크립트 해제 이외의 오류는 숨기지 않는다', async () => {
+    const {controller, model, script} = prepare('node');
+    sinon.stub(model, 'scripts').returns([script]);
+    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({getError: () => 'Connection is closed'});
+    await pause(model, script, 0);
+    assert.include(controller.session.error ?? '', 'Connection is closed');
+    assert.lengthOf(controller.session.history, 0);
+  });
+
   it('기록용 중단점과 함께 전달된 XHR 정지도 사용자에게 보여 준다', async () => {
     const prepared = prepare('node');
     const {model, script} = prepared;

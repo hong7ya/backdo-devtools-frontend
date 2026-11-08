@@ -27,6 +27,8 @@ copy_to_gen("fixtures") {
 
 node_ts_library("tests") {
   sources = [
+    "tests/BrowserTestTarget.ts",
+    "tests/FrontendTestServer.ts",
     "tests/browser-replay.test.ts",
     "tests/process-manager.test.ts",
   ]

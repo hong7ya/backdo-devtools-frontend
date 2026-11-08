@@ -177,6 +177,11 @@ export class ConsoleModel extends SDKModel<EventTypes> {
   async evaluateCommandInConsole(
       executionContext: ExecutionContext, originatingMessage: ConsoleMessage, expression: string,
       useCommandLineAPI: boolean): Promise<void> {
+    // 실행이 debugger 문에서 멈추기 전에 콘솔 입력을 기록할 수 있게 알린다.
+    this.dispatchEventToListeners(Events.CommandWillBeEvaluated, {
+      executionContext, expression, useCommandLineAPI,
+      userGesture: Common.Settings.Settings.instance().moduleSetting('console-user-activation-eval').get(),
+    });
     const result = await executionContext.evaluate(
         {
           expression,
@@ -514,7 +519,15 @@ export enum Events {
   MessageAdded = 'MessageAdded',
   MessageUpdated = 'MessageUpdated',
   CommandEvaluated = 'CommandEvaluated',
+  CommandWillBeEvaluated = 'CommandWillBeEvaluated',
   /* eslint-enable @typescript-eslint/naming-convention */
+}
+
+export interface ConsoleCommand {
+  executionContext: ExecutionContext;
+  expression: string;
+  useCommandLineAPI: boolean;
+  userGesture: boolean;
 }
 
 export interface CommandEvaluatedEvent {
@@ -528,6 +541,7 @@ export interface EventTypes {
   [Events.MessageAdded]: ConsoleMessage;
   [Events.MessageUpdated]: ConsoleMessage;
   [Events.CommandEvaluated]: CommandEvaluatedEvent;
+  [Events.CommandWillBeEvaluated]: ConsoleCommand;
 }
 
 export interface AffectedResources {

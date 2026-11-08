@@ -1,6 +1,6 @@
 # BackDo의 실행 기록과 복원
 
-BackDo는 빌드된 `devtools-frontend` 웹 화면이다. 실행 위치의 순서를 기록하고, 대상 프로세스를 처음부터 다시 실행하여 직전 위치로 돌아간다. 변수·힙·클로저의 스냅샷은 저장하지 않는다.
+BackDo는 빌드된 `devtools-frontend` 웹 화면이다. 지원 대상은 Console에 입력한 코드와 Node 프로그램이다. 실행 위치의 순서를 기록하고, 대상 프로세스를 처음부터 다시 실행하여 직전 위치로 돌아간다. 변수·힙·클로저의 스냅샷은 저장하지 않는다.
 
 ## 실제 사용 방법
 
@@ -23,7 +23,6 @@ npm start
 - **기존 콘솔 사용:** server 디렉터리의 다른 터미널에서 `npm run ws`를 실행한다. 출력된 `?ws=...&backdoServer=...`를 `http://127.0.0.1:8000/out/Default/gen/front_end/devtools_app.html` 뒤에 붙여 연다. Console에 `debugger;`와 코드를 입력한다.
 - **Node 사용:** 사용자가 자신의 터미널에서 `node --inspect-brk <cli.js> [인자...]`를 실행한다. `http://127.0.0.1:8000/out/Default/gen/front_end/js_app.html?port=9229`를 연다. 파일 경로나 실행 명령을 BackDo에 전달하지 않는다.
 - **기존 Node 주소:** `/json/list`에서 얻은 `js_app.html?ws=127.0.0.1:9229/<ID>`도 지원한다.
-- **웹페이지:** 서버가 생성한 브라우저의 ws로 `inspector.html?ws=...`에 연결한다. 대상 페이지로 이동한 뒤 같은 공통 복원 엔진을 사용한다.
 
 8000은 사용자가 여는 화면 포트의 예시다. 프런트엔드의 정적 서버나 배포 위치는 자유롭게 선택한다. API 서버는 프런트엔드 파일을 제공하지 않는다. API 포트는 `BACKDO_SERVER_PORT`로 지정하며, 기본 3000이 아닌 API를 사용하면 화면 주소에 `backdoServer=http://127.0.0.1:<서버 포트>`를 붙인다.
 
@@ -35,7 +34,7 @@ npm start
 | 뒤로가기 | 기존 프로세스 종료 확인 → 같은 포트로 재시작 → 새 ws로 연결 교체 |
 | 측정 실패·재시작 연동 없음 | 뒤로가기 버튼 비활성화와 사유 표시 |
 
-`LocalTargetLifecycle`이 실제 HTTP 연결을 맡고 `ReplayConnection`·`ReplayController`는 콘솔·Node·inspector가 공유한다. 통합 테스트도 제품의 서버 API를 호출하며 테스트용 lifecycle을 주입하지 않는다. 포트만으로 브라우저 JavaScript가 OS 프로세스를 제어할 수는 없으므로 로컬 서버가 필요하다.
+`LocalTargetLifecycle`이 실제 HTTP 연결을 맡고 `ReplayConnection`·`ReplayController`는 콘솔·Node가 공유한다. 통합 테스트도 제품의 서버 API를 호출하며 테스트용 lifecycle을 주입하지 않는다. 포트만으로 브라우저 JavaScript가 OS 프로세스를 제어할 수는 없으므로 로컬 서버가 필요하다.
 
 화면을 별도로 배포할 때는 API 서버의 `BACKDO_ALLOWED_ORIGINS`에 배포 출처를 추가할 수 있다. 이 작업에는 운영 사이트 배포가 포함되지 않는다. [Chrome의 로컬 네트워크 접근 권한](https://developer.chrome.com/blog/local-network-access)이 필요한 환경에서는 허용해야 한다. 로컬 개발에서도 화면과 API는 다른 출처이며, 서버가 로컬 화면의 API 접근을 허용한다.
 
@@ -53,7 +52,7 @@ npm start
 ## 공통 실행 흐름
 
 ```text
-기존 콘솔 / Node ws 연결 / inspector 웹페이지
+기존 콘솔 / Node ws 연결
                          ↓
         ReplayConnection: 대상과 연결 구성
                          ↓
@@ -67,7 +66,7 @@ npm start
                          ↓
      같은 문서에서 history.replaceState로 주소 갱신
                          ↓
- 콘솔 원문 다시 제출 / 웹페이지 이동 / Node 실행 재개
+ 콘솔 원문 다시 제출 / Node 실행 재개
                          ↓
      매 정지의 소스 해시·줄·열·순서를 기록과 대조
                          ↓
@@ -76,7 +75,7 @@ npm start
 
 `history.replaceState`는 실제 연결이 응답한 뒤 적용한다. BackDo 문서와 `history.state`를 유지한다. 중간 정지는 SDK에서 소비하므로 Sources 패널에는 최종 정지만 전달한다.
 
-브라우저와 Node가 별도 복원 엔진을 갖지 않는다. 대상별 차이는 연결 종류와 시작 입력에 한정한다. 웹페이지 재시작은 기존 페이지 URL로 다시 이동하며, 콘솔 입력은 원문과 입력 시점을 다시 제출한다. 콘솔에서 먼저 준비 코드를 실행한 뒤 디버깅 코드를 입력하는 경우도 테스트했다.
+Console과 Node는 같은 복원 엔진을 사용한다. Console은 원문과 입력 시점을 다시 제출하고, Node는 같은 실행 인자로 프로그램을 다시 시작한다. 콘솔에서 먼저 준비 코드를 실행한 뒤 디버깅 코드를 입력하는 경우도 테스트했다.
 
 ## 내부 코드와 사용자 기록의 구분
 
@@ -181,7 +180,7 @@ npm test -- --skip-ninja scripts/backdo/tests
 
 통합 테스트 전 형제 `server`에서 `npm ci`를 실행한다. 다른 서버 저장소 경로는 `BACKDO_SERVER_DIR`로 지정한다. 테스트는 화면과 API를 서로 다른 임시 포트에서 제공한다. 저장소 Chrome for Testing 경로를 기본으로 사용하며 다른 Chrome은 `CHROME_BIN`으로 지정한다. `BACKDO_FRONTEND_DIR`는 테스트용 정적 서버가 읽을 빌드 폴더를 지정하는 환경변수다. 제품 API 서버의 설정이 아니다. 제품 사용을 위해 테스트 도우미를 실행할 필요는 없다.
 
-개발 검증은 변경 TS를 별도 화면 디렉터리에 컴파일하여 수행했다. 리뷰 반복 후 프런트엔드 Mocha·Chai 단위 테스트 110개, 실제 화면 통합 테스트 23개, 서버 Mocha·Chai 테스트 8개가 통과했다. 전체 프런트엔드 빌드와 별개로 변경 파일 ESLint, Node 테스트 TypeScript, GN 의존성도 검사한다.
+개발 검증은 변경 TS를 별도 화면 디렉터리에 컴파일하여 수행한다. Console·Node의 단위 테스트, 실제 화면 통합 테스트, 서버 테스트는 기존 Mocha·Chai 규약을 사용한다. 전체 프런트엔드 빌드와 별개로 변경 파일 ESLint, Node 테스트 TypeScript, GN 의존성도 검사한다.
 
 테스트의 기대 위치는 예제 원문의 조건식·증감식·함수 호출·반환 위치에서 정한다. 제품의 실행 기록을 기대값으로 읽지 않는다. `BrowserTestEnvironment`는 자원 준비와 정리만 담당하며, 측정·화면·부작용 검증은 테스트 본문에 둔다. 콘솔의 한 줄 명령, 여러 줄 붙여넣기, 줄 중단점 추가·삭제는 기존 DevTools 도우미를 재사용한다. 테스트 전용 Chrome 재시작 구현은 제거하고 실제 서버를 통해 복원한다.
 
@@ -189,9 +188,8 @@ npm test -- --skip-ninja scripts/backdo/tests
 
 ## 남은 범위
 
-- 외부에서 별도로 실행한 Chrome의 재시작은 지원하지 않는다. 현재는 이 서버가 만든 브라우저를 관리한다.
-- Node·웹페이지·콘솔은 공통 기록기를 사용한다. 불러온 모듈은 최초 정지에서, 이후 모듈은 실행 직전에 기록 지점을 준비하며 기존 Ignore List를 따른다. Node의 `Break on start`는 일반 중단점이 없는 위치에서도 재시작의 기준점으로 보관한다. Worker·여러 프로세스를 아우르는 기록은 구현하지 않았다.
-- 웹페이지 검증에는 단일 스크립트와 정적·동적 import의 모듈 간 복원이 포함된다. 실제 웹 서비스의 쿠키·네트워크 응답·사용자 이벤트까지 기록·복원하지 않는다.
+- 지원하는 시작 입력은 Console에 제출한 코드와 Node 실행 파일·인자다. Console 실행용 Chrome은 로컬 서버가 생성·관리한다.
+- Node·콘솔은 공통 기록기를 사용한다. 불러온 모듈은 최초 정지에서, 이후 모듈은 실행 직전에 기록 지점을 준비하며 기존 Ignore List를 따른다. Node의 `Break on start`는 일반 중단점이 없는 위치에서도 재시작의 기준점으로 보관한다. Worker·여러 프로세스를 아우르는 기록은 구현하지 않았다.
 - Step over/out은 동기 호출 스택 깊이를 기준으로 판단한다. 비동기 경계의 모든 Step 동작이 Chrome 기본 동작과 같다고 보장하지 않는다.
 - 위치 순서가 같아도 변수 값이 같다는 뜻은 아니다. 시간·난수·외부 입력·비동기 순서는 저장하지 않는다. 경로나 소스 해시가 달라지면 복원을 실패 처리한다.
 - 재실행한 로그·파일 쓰기·네트워크 요청 등의 부작용은 다시 발생한다. 외부 상태를 되돌리지 않는다.

@@ -174,6 +174,12 @@ class ScriptsMochaTests extends Tests {
   }
 }
 
+class CompiledMochaTests extends Tests {
+  override run(tests: PathPair[]) {
+    return super.run(tests, [path.join(SOURCE_ROOT, 'node_modules', 'mocha', 'bin', 'mocha')]);
+  }
+}
+
 class KarmaTests extends Tests {
   override run(tests: PathPair[]) {
     return super.run(tests, [
@@ -198,7 +204,7 @@ function main() {
     new ScriptsMochaTests(path.join(SOURCE_ROOT, 'scripts/eslint_rules/tests')),
     new ScriptsMochaTests(path.join(SOURCE_ROOT, 'scripts/stylelint_rules/tests')),
     new ScriptsMochaTests(path.join(SOURCE_ROOT, 'scripts/build/tests')),
-    new ScriptsMochaTests(path.join(SOURCE_ROOT, 'scripts/backdo/tests')),
+    new CompiledMochaTests(path.join(GEN_DIR, 'scripts/backdo/tests')),
   ];
 
   if (!options['skip-ninja']) {

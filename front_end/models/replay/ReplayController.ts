@@ -6,7 +6,10 @@ import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
-import {type ExecutionCommand, ReplaySession} from './ReplaySession.js';
+import {ReplaySession} from './ReplaySession.js';
+
+const SESSION_REQUEST_TIMEOUT_MS = 15_000;
+const REPLAY_TIMEOUT_MS = 30_000;
 
 interface ManagedTarget {
   ws: string;
@@ -21,21 +24,21 @@ interface EventTypes {
   [Events.CHANGED]: void;
 }
 
-/** Entry-script recording for a Node process owned by scripts/backdo/debug.mjs. */
+/** 실행 관리기가 소유한 Node 프로세스에서 진입 파일의 실행 위치를 기록하고 재실행한다. */
 export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTypes> {
   static #instance: ReplayController;
   readonly session = new ReplaySession();
-  #token = '';
+  #sessionToken = '';
   #entryURL = '';
-  #model: SDK.DebuggerModel.DebuggerModel|null = null;
-  #connect: ((ws: string) => Promise<void>)|null = null;
-  #breakpoints = new Set<string>();
-  #locations = new Set<string>();
-  #debuggerStatements = new Set<string>();
-  #initialized = false;
-  #busy = false;
-  #complete: (() => void)|null = null;
-  #reject: ((error: Error) => void)|null = null;
+  #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
+  #connectToTarget: ((ws: string) => Promise<void>)|null = null;
+  #recordingBreakpointIds = new Set<string>();
+  #recordablePositions = new Set<string>();
+  #debuggerStatementPositions = new Set<string>();
+  #hasRecordingBreakpoints = false;
+  #isReplaying = false;
+  #resolveReplay: (() => void)|null = null;
+  #rejectReplay: ((error: Error) => void)|null = null;
 
   static instance(): ReplayController {
     this.#instance ??= new ReplayController();
@@ -43,21 +46,21 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get busy(): boolean {
-    return this.#busy;
+    return this.#isReplaying;
   }
 
   canReverse(model: SDK.DebuggerModel.DebuggerModel|null): boolean {
-    return model === this.#model && Boolean(model?.isPaused()) && !this.#busy && this.session.canReverse;
+    return model === this.#debuggerModel && Boolean(model?.isPaused()) && !this.#isReplaying && this.session.canReverse;
   }
 
   get status(): string {
     if (this.session.error) {
       return `BackDo unavailable: ${this.session.error}`;
     }
-    if (!this.#token) {
-      return 'Start a managed Node session with scripts/backdo/debug.mjs to use BackDo';
+    if (!this.#sessionToken) {
+      return 'Start a managed Node session with out/Default/gen/scripts/backdo/debug.js to use BackDo';
     }
-    if (this.#busy) {
+    if (this.#isReplaying) {
       return 'Replaying the process to the previous recorded position…';
     }
     return this.session.canReverse ? 'Go to the previous recorded position (restarts and re-executes the process)' :
@@ -65,9 +68,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async configure(token: string, connect: (ws: string) => Promise<void>): Promise<ManagedTarget> {
-    this.#token = token;
-    this.#connect = connect;
-    const target = await this.#request('session');
+    this.#sessionToken = token;
+    this.#connectToTarget = connect;
+    const target = await this.#requestManagedTarget('session');
     this.#entryURL = target.entryURL;
     Common.Settings.Settings.instance().moduleSetting('breakpoints-active').addChangeListener(() => {
       if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
@@ -82,35 +85,101 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (!model) {
       throw new Error('The target does not provide a debugger');
     }
-    this.#model = model;
-    this.#breakpoints = new Set();
-    this.#locations = new Set();
-    this.#debuggerStatements = new Set();
-    this.#initialized = false;
-    model.setPauseInterceptor(details => this.#paused(details));
-    model.setExecutionInterceptor(command => this.#command(command));
+    this.#debuggerModel = model;
+    this.#recordingBreakpointIds = new Set();
+    this.#recordablePositions = new Set();
+    this.#debuggerStatementPositions = new Set();
+    this.#hasRecordingBreakpoints = false;
+    model.setPauseInterceptor(details => this.#handlePause(details));
+    model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
     model.addEventListener(SDK.DebuggerModel.Events.ScriptSourceWasEdited, () => {
       this.fail(new Error('The source was edited; start a new session'));
     });
     model.addEventListener(SDK.DebuggerModel.Events.DebuggerPaused, () => {
-      // Resolve after the normal SDK event, so the final call frame reaches Sources.
-      if (this.#busy && !this.session.replaying && !this.session.error) {
-        queueMicrotask(() => this.#complete?.());
+      // SDK가 최종 정지를 알린 뒤 완료한다. 에디터 준비는 화면 계층에서 별도로 기다린다.
+      if (this.#isReplaying && !this.session.replaying && !this.session.error) {
+        queueMicrotask(() => this.#resolveReplay?.());
       }
-      this.#changed();
+      this.#notifyStatusChanged();
     });
-    model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#changed());
+    model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#notifyStatusChanged());
     if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
       this.fail(new Error('Enable breakpoints and start a new managed session'));
     }
-    this.#changed();
+    this.#notifyStatusChanged();
   }
 
-  async #request(operation: 'session'|'restart'): Promise<ManagedTarget> {
+  async reverse(): Promise<void> {
+    if (!this.canReverse(this.#debuggerModel) || !this.#connectToTarget) {
+      throw new Error(this.status);
+    }
+    const completion = this.#beginReplay();
+    try {
+      // 연결이 열린 뒤 응답이 오지 않는 경우도 제한 시간에 포함한다.
+      await Promise.race([this.#restartAndReplay(completion.promise), completion.promise]);
+    } catch (error) {
+      this.fail(error);
+      throw error;
+    } finally {
+      completion.clearTimeout();
+      this.#resolveReplay = null;
+      this.#rejectReplay = null;
+      this.#isReplaying = false;
+      this.#notifyStatusChanged();
+    }
+  }
+
+  fail(error: unknown): void {
+    if (this.session.error) {
+      return;
+    }
+    this.session.fail(error);
+    this.#rejectReplay?.(new Error(this.session.error ?? 'Replay failed'));
+    this.#debuggerModel?.setExecutionInterceptor(null);
+    this.#debuggerModel?.setPauseInterceptor(null);
+    for (const breakpointId of this.#recordingBreakpointIds) {
+      void this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
+    }
+    this.#recordingBreakpointIds.clear();
+    Common.Console.Console.instance().error(`BackDo: ${this.session.error}`);
+    if (this.#isReplaying) {
+      void this.#debuggerModel?.agent.invoke_pause();
+    }
+    this.#notifyStatusChanged();
+  }
+
+  #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
+    this.session.beginReverse();
+    this.#isReplaying = true;
+    this.#notifyStatusChanged();
+    const promise = new Promise<void>((resolve, reject) => {
+      this.#resolveReplay = resolve;
+      this.#rejectReplay = reject;
+    });
+    const timeout = setTimeout(() => {
+      this.fail(new Error('Replay timed out before reaching the recorded position'));
+    }, REPLAY_TIMEOUT_MS);
+    return {promise, clearTimeout: () => clearTimeout(timeout)};
+  }
+
+  async #restartAndReplay(completed: Promise<void>): Promise<void> {
+    await this.#debuggerModel?.target().router()?.connection().disconnect();
+    const target = await this.#requestManagedTarget('restart');
+    if (this.session.error) {
+      throw new Error(this.session.error);
+    }
+    if (target.entryURL !== this.#entryURL) {
+      throw new Error('The managed entry script changed');
+    }
+    await this.#connectToTarget?.(target.ws);
+    await completed;
+  }
+
+  async #requestManagedTarget(operation: 'session'|'restart'): Promise<ManagedTarget> {
     const response = await fetch(`/__backdo/${operation}`, {
       method: operation === 'restart' ? 'POST' : 'GET',
-      headers: {'X-BackDo-Session': this.#token},
-      signal: AbortSignal.timeout(15_000),
+      headers: {'X-BackDo-Session': this.#sessionToken},
+      signal: AbortSignal.timeout(SESSION_REQUEST_TIMEOUT_MS),
     });
     const result = await response.json();
     if (!response.ok) {
@@ -120,10 +189,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (ws.protocol !== 'ws:' || ws.hostname !== '127.0.0.1' || typeof result.entryURL !== 'string') {
       throw new Error('Invalid local target connection');
     }
-    return result as ManagedTarget;
+    return {ws: result.ws, entryURL: result.entryURL};
   }
 
-  async #install(script: SDK.Script.Script): Promise<void> {
+  async #installRecordingBreakpoints(script: SDK.Script.Script): Promise<void> {
     const model = script.debuggerModel;
     const result = await model.agent.invoke_getPossibleBreakpoints({
       start: {scriptId: script.scriptId, lineNumber: script.lineOffset, columnNumber: script.columnOffset},
@@ -136,9 +205,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     for (const location of result.locations) {
       const key = `${location.lineNumber}:${location.columnNumber ?? 0}`;
       if (location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement) {
-        this.#debuggerStatements.add(key);
+        this.#debuggerStatementPositions.add(key);
       }
-      if (this.#locations.has(key)) {
+      if (this.#recordablePositions.has(key)) {
         continue;
       }
       const breakpoint = await model.agent.invoke_setBreakpoint({location});
@@ -149,50 +218,50 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (actual.lineNumber !== location.lineNumber || actual.columnNumber !== location.columnNumber) {
         throw new Error('The runtime moved a recording breakpoint to a different position');
       }
-      this.#breakpoints.add(breakpoint.breakpointId);
-      this.#locations.add(key);
+      this.#recordingBreakpointIds.add(breakpoint.breakpointId);
+      this.#recordablePositions.add(key);
     }
-    this.#initialized = true;
+    this.#hasRecordingBreakpoints = true;
   }
 
-  async #paused(details: SDK.DebuggerModel.DebuggerPausedDetails): Promise<boolean> {
+  async #handlePause(details: SDK.DebuggerModel.DebuggerPausedDetails): Promise<boolean> {
     if (this.session.error) {
       return false;
     }
     try {
       const frame = details.callFrames[0];
       if (!frame || frame.script.sourceURL !== this.#entryURL) {
-        if (this.#busy) {
-          await this.#resume();
+        if (this.#isReplaying) {
+          await this.#resumeExecution();
           return true;
         }
         this.session.unrecordedPause();
-        this.#changed();
+        this.#notifyStatusChanged();
         return false;
       }
-      const initial = !this.#initialized;
+      const initial = !this.#hasRecordingBreakpoints;
       if (initial) {
-        await this.#install(frame.script);
+        await this.#installRecordingBreakpoints(frame.script);
       }
       const {lineNumber, columnNumber} = frame.location();
       const key = `${lineNumber}:${columnNumber}`;
-      if (!this.#locations.has(key)) {
+      if (!this.#recordablePositions.has(key)) {
         throw new Error('This pause is not a reproducible breakpoint position; start a new session');
       }
-      const userVisible = initial || this.#debuggerStatements.has(key) ||
-          details.breakpointIds.some(id => !this.#breakpoints.has(id)) ||
-          details.reason === Protocol.Debugger.PausedEventReason.Exception ||
+      const hitUserBreakpoint = details.breakpointIds.some(id => !this.#recordingBreakpointIds.has(id));
+      const pausedOnException = details.reason === Protocol.Debugger.PausedEventReason.Exception ||
           details.reason === Protocol.Debugger.PausedEventReason.PromiseRejection;
-      const publish = this.session.accept({
+      const userVisible = initial || this.#debuggerStatementPositions.has(key) || hitUserBreakpoint || pausedOnException;
+      const disposition = this.session.recordPause({
         position: {url: frame.script.sourceURL, hash: frame.script.hash, lineNumber, columnNumber},
         depth: details.callFrames.length,
         userVisible,
       });
-      if (!publish) {
-        await this.#resume();
+      if (disposition === 'continue') {
+        await this.#resumeExecution();
         return true;
       }
-      this.#changed();
+      this.#notifyStatusChanged();
       return false;
     } catch (error) {
       this.fail(error);
@@ -200,8 +269,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
   }
 
-  #command(command: SDK.DebuggerModel.ExecutionCommand): boolean {
-    if (this.#busy) {
+  #handleExecutionCommand(command: SDK.DebuggerModel.ExecutionCommand): boolean {
+    if (this.#isReplaying) {
       return true;
     }
     if (this.session.error) {
@@ -211,81 +280,24 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error('Skipping pauses interrupts recording; start a new session'));
       return false;
     }
-    this.session.command(command as ExecutionCommand);
-    this.#changed();
+    this.session.beginExecution(command);
+    this.#notifyStatusChanged();
     if (command === 'pause') {
-      void this.#model?.agent.invoke_pause();
+      void this.#debuggerModel?.agent.invoke_pause();
     } else {
-      void this.#resume().catch(error => this.fail(error));
+      void this.#resumeExecution().catch(error => this.fail(error));
     }
     return true;
   }
 
-  async #resume(): Promise<void> {
-    const response = await this.#model?.agent.invoke_resume({terminateOnResume: false});
+  async #resumeExecution(): Promise<void> {
+    const response = await this.#debuggerModel?.agent.invoke_resume({terminateOnResume: false});
     if (response?.getError()) {
       throw new Error(response.getError());
     }
   }
 
-  async reverse(): Promise<void> {
-    if (!this.canReverse(this.#model) || !this.#connect) {
-      throw new Error(this.status);
-    }
-    this.session.beginReverse();
-    this.#busy = true;
-    this.#changed();
-    let timer: ReturnType<typeof setTimeout>|undefined;
-    const completed = new Promise<void>((resolve, reject) => {
-      this.#complete = resolve;
-      this.#reject = reject;
-      timer = setTimeout(() => this.fail(new Error('Replay timed out before reaching the recorded position')), 30_000);
-    });
-    // Attach a handler immediately, including while the process request is pending.
-    void completed.catch(() => {});
-    try {
-      await this.#model?.target().router()?.connection().disconnect();
-      const target = await this.#request('restart');
-      if (this.session.error) {
-        throw new Error(this.session.error);
-      }
-      if (target.entryURL !== this.#entryURL) {
-        throw new Error('The managed entry script changed');
-      }
-      await this.#connect(target.ws);
-      await completed;
-    } catch (error) {
-      this.fail(error);
-      throw error;
-    } finally {
-      clearTimeout(timer);
-      this.#complete = null;
-      this.#reject = null;
-      this.#busy = false;
-      this.#changed();
-    }
-  }
-
-  fail(error: unknown): void {
-    if (this.session.error) {
-      return;
-    }
-    this.session.fail(error);
-    this.#reject?.(new Error(this.session.error ?? 'Replay failed'));
-    this.#model?.setExecutionInterceptor(null);
-    this.#model?.setPauseInterceptor(null);
-    for (const breakpointId of this.#breakpoints) {
-      void this.#model?.agent.invoke_removeBreakpoint({breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
-    }
-    this.#breakpoints.clear();
-    Common.Console.Console.instance().error(`BackDo: ${this.session.error}`);
-    if (this.#busy) {
-      void this.#model?.agent.invoke_pause();
-    }
-    this.#changed();
-  }
-
-  #changed(): void {
+  #notifyStatusChanged(): void {
     this.dispatchEventToListeners(Events.CHANGED);
   }
 }

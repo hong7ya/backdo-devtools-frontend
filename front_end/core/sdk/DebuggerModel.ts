@@ -169,7 +169,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   #executionInterceptor: ((command: ExecutionCommand) => boolean)|null = null;
   #internalPause = false;
 
-  // An internal recording pause is consumed before bindings and UI see it.
+  // 기록용 내부 정지는 바인딩과 UI에 전달되기 전에 처리한다.
   setPauseInterceptor(interceptor: ((details: DebuggerPausedDetails) => Promise<boolean>)|null): void {
     this.#pauseInterceptor = interceptor;
   }
@@ -721,7 +721,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     const pausedDetails =
         new DebuggerPausedDetails(this, callFrames, reason, auxData, breakpointIds, asyncStackTrace, asyncStackTraceId);
     if (this.#pauseInterceptor) {
-      // Set before awaiting: an internal resume may arrive during the callback.
+      // 콜백을 기다리는 동안 resumed 이벤트가 올 수 있으므로 내부 정지 여부를 먼저 설정한다.
       this.#internalPause = true;
       try {
         if (await this.#pauseInterceptor(pausedDetails)) {

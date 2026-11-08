@@ -6,11 +6,11 @@ import * as Replay from './replay.js';
 
 const {ExecutionHistory} = Replay.ExecutionHistory;
 
-describe('ExecutionHistory', () => {
+describe('실행 위치 기록', () => {
   const at = (lineNumber: number, columnNumber: number, hash = 'source-v1') =>
       ({url: 'file:///algorithm.js', hash, lineNumber, columnNumber});
 
-  it('reverse after a for loop selects the final condition, including its column and fifth visit', () => {
+  it('for 문 밖에서 되돌리면 다섯 번째이자 마지막인 조건식의 정확한 열로 이동한다', () => {
     const history = new ExecutionHistory();
     const condition = at(2, 20);
     const events = [at(2, 15), condition];
@@ -30,13 +30,13 @@ describe('ExecutionHistory', () => {
     assert.deepEqual(history.previous().target, at(2, 27));
   });
 
-  it('a break exit follows its actual predecessor, not a hardcoded loop condition', () => {
+  it('break로 빠져나왔을 때 실제 직전 위치를 선택한다', () => {
     const history = new ExecutionHistory();
     [at(2, 20), at(3, 4), at(4, 6), at(7, 2)].forEach(p => history.record(p));
     assert.deepEqual(history.previous().target, at(4, 6));
   });
 
-  it('the full prefix and source version must agree before a replay can be committed', () => {
+  it('목표까지의 전체 위치 순서와 소스 버전이 일치해야 복원을 확정한다', () => {
     const history = new ExecutionHistory();
     [at(0, 0), at(2, 20), at(6, 2)].forEach(p => history.record(p));
     assert.throws(() => history.previous().accept(at(0, 0, 'edited-source')), /diverged/);
@@ -47,7 +47,7 @@ describe('ExecutionHistory', () => {
     assert.lengthOf(history, 3);
   });
 
-  it('recording after reverse replaces the old future and does not retain mutable input objects', () => {
+  it('복원 후에는 새로운 이력을 기록하고 입력 객체의 외부 변경을 차단한다', () => {
     const history = new ExecutionHistory();
     const position = at(0, 0);
     history.record(position);
@@ -61,7 +61,7 @@ describe('ExecutionHistory', () => {
     assert.deepEqual(history.previous().target, at(0, 0));
   });
 
-  it('unavailable history and capacity exhaustion fail explicitly without dropping the replay prefix', () => {
+  it('이력이 없거나 용량이 부족하면 앞선 기록을 버리지 않고 실패 처리한다', () => {
     const history = new ExecutionHistory(2);
     assert.isFalse(history.canReverse);
     assert.throws(() => history.previous(), /No previous/);

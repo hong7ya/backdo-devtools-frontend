@@ -9,6 +9,7 @@ group("test") {
   deps = [
     ":run",
     ":unittests",
+    "../scripts/backdo:backdo",
     "e2e",
     "interactions",
     "perf",

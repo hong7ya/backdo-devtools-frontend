@@ -13,11 +13,21 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 /** 빌드된 파일만 제공한다. 사용자 프로세스의 실행이나 별도 server API를 대신 구현하지 않는다. */
-export async function serveTestFrontend(): Promise<{origin: string, close: () => Promise<void>}> {
+export async function serveTestFrontend(pageSource?: string): Promise<{origin: string, close: () => Promise<void>}> {
   const root = await realpath(process.env.BACKDO_FRONTEND_DIR ?? path.resolve(__dirname, '../../../front_end'));
   const server = createServer((request, response) => {
     void (async () => {
       const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
+      if (pageSource && pathname === '/fixture.html') {
+        response.setHeader('Content-Type', 'text/html');
+        response.end('<!doctype html><meta charset="utf-8"><script src="/fixture.js"></script>');
+        return;
+      }
+      if (pageSource && pathname === '/fixture.js') {
+        response.setHeader('Content-Type', 'text/javascript');
+        response.end(pageSource);
+        return;
+      }
       const filename = await realpath(path.join(root, pathname));
       const relative = path.relative(root, filename);
       if (relative.startsWith('..') || path.isAbsolute(relative)) {

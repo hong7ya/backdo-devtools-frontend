@@ -5,14 +5,6 @@
 import("../build/ninja/copy.gni")
 import("../build/typescript/typescript.gni")
 
-node_ts_library("server") {
-  sources = [
-    "DebugServer.ts",
-    "ManagedProcess.ts",
-    "debug.ts",
-  ]
-}
-
 node_ts_library("browser_test_protocol") {
   sources = [ "tests/BrowserTestProtocol.ts" ]
 }
@@ -29,12 +21,11 @@ node_ts_library("tests") {
   sources = [
     "tests/BrowserTestTarget.ts",
     "tests/FrontendTestServer.ts",
+    "tests/NodeTestTarget.ts",
     "tests/browser-replay.test.ts",
-    "tests/process-manager.test.ts",
   ]
   deps = [
     ":browser_test_protocol",
-    ":server",
     "../../front_end/models/replay:browser_test_support",
     "../../test/conductor:implementation",
   ]
@@ -43,7 +34,6 @@ node_ts_library("tests") {
 group("backdo") {
   deps = [
     ":fixtures",
-    ":server",
     ":tests",
   ]
 }

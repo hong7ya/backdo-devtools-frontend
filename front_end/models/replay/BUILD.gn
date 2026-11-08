@@ -4,6 +4,7 @@
 
 import("../../../scripts/build/ninja/devtools_entrypoint.gni")
 import("../../../scripts/build/ninja/devtools_module.gni")
+import("../../../scripts/build/typescript/typescript.gni")
 import("../visibility.gni")
 
 devtools_module("replay") {
@@ -19,4 +20,10 @@ devtools_entrypoint("bundle") {
     "../../panels/*",
   ]
   visibility += devtools_models_visibility
+}
+
+ts_library("unittests") {
+  testonly = true
+  sources = [ "ExecutionHistory.test.ts" ]
+  deps = [ ":bundle" ]
 }

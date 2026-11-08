@@ -539,30 +539,54 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     const positions = new Set<string>();
     const debuggerStatements = new Set<string>();
+    const resolvedPositions = new Map<string, string>();
     for (const location of result.locations) {
-      const key = `${location.lineNumber}:${location.columnNumber ?? 0}`;
+      const requestedKey = positionKey(location);
+      let actualKey = resolvedPositions.get(requestedKey);
+      if (!actualKey) {
+        // 앞선 후보가 이 위치로 보정되었다면 이미 설치한 중단점을 사용한다.
+        actualKey = positions.has(requestedKey) ? requestedKey :
+                                                await this.#installRecordingBreakpoint(script, location, positions);
+        resolvedPositions.set(requestedKey, actualKey);
+      }
       if (location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement) {
-        debuggerStatements.add(key);
+        debuggerStatements.add(actualKey);
       }
-      if (positions.has(key)) {
-        continue;
-      }
-      if (this.#recordingBreakpointIds.size >= REPLAY_LIMITS.breakpoints) {
-        throw new Error(RECORDING_LIMIT_MESSAGE);
-      }
-      const breakpoint = await model.agent.invoke_setBreakpoint({location});
-      if (breakpoint.getError()) {
-        throw new Error(breakpoint.getError());
-      }
-      const actual = breakpoint.actualLocation;
-      if (actual.lineNumber !== location.lineNumber || actual.columnNumber !== location.columnNumber) {
-        throw new Error('런타임이 기록용 브레이크포인트 위치를 변경했습니다.');
-      }
-      this.#recordingBreakpointIds.add(breakpoint.breakpointId);
-      positions.add(key);
-      this.#notifyUsageChanged();
     }
     return {url, positions, debuggerStatements};
+  }
+
+  async #installRecordingBreakpoint(
+      script: SDK.Script.Script, location: Protocol.Debugger.Location, positions: Set<string>): Promise<string> {
+    if (this.#recordingBreakpointIds.size >= REPLAY_LIMITS.breakpoints) {
+      throw new Error(RECORDING_LIMIT_MESSAGE);
+    }
+    const agent = script.debuggerModel.agent;
+    const breakpoint = await agent.invoke_setBreakpoint({location});
+    const error = breakpoint.getError();
+    if (error) {
+      throw new Error(error);
+    }
+    const {breakpointId, actualLocation} = breakpoint;
+    const alreadyOwned = this.#recordingBreakpointIds.has(breakpointId);
+    // 설치 후 검증이나 중복 제거가 실패해도 이 ID를 빠짐없이 정리한다.
+    this.#recordingBreakpointIds.add(breakpointId);
+    if (actualLocation.scriptId !== script.scriptId) {
+      throw new Error('기록용 브레이크포인트가 다른 소스에 설치되었습니다.');
+    }
+    const actualKey = positionKey(actualLocation);
+    if (positions.has(actualKey) && !alreadyOwned) {
+      // 서로 다른 후보가 같은 위치로 모이면 추가 ID만 제거한다.
+      const removed = await agent.invoke_removeBreakpoint({breakpointId});
+      const removeError = removed.getError();
+      if (removeError) {
+        throw new Error(removeError);
+      }
+      this.#recordingBreakpointIds.delete(breakpointId);
+    }
+    positions.add(actualKey);
+    this.#notifyUsageChanged();
+    return actualKey;
   }
 
   async #handlePause(details: SDK.DebuggerModel.DebuggerPausedDetails): Promise<boolean> {
@@ -596,7 +620,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         return false;
       }
       const {lineNumber, columnNumber} = frame.location();
-      const key = `${lineNumber}:${columnNumber}`;
+      const key = positionKey({lineNumber, columnNumber});
       const position = {url: script.url, hash: frame.script.hash, lineNumber, columnNumber};
       const hitRecordingBreakpoint = details.breakpointIds.some(id => this.#recordingBreakpointIds.has(id));
       // Node의 시작 정지는 일반 중단점이 없는 import 앞에도 오며, --inspect-brk 재시작으로 재현된다.
@@ -735,4 +759,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 /** 서버와 프론트가 공유하는 내부 소스 이름이다. 파일명·실행 완료 여부로 사용자 코드를 제외하지 않는다. */
 function isInternalScript(script: SDK.Script.Script): boolean {
   return script.sourceURL.startsWith('backdo-internal:///');
+}
+
+function positionKey(location: {lineNumber: number, columnNumber?: number}): string {
+  return `${location.lineNumber}:${location.columnNumber ?? 0}`;
 }

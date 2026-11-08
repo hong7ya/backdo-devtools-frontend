@@ -29,6 +29,157 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.include(controller.status, '재시작 연동');
   });
 
+  it('보정된 정지 좌표를 기록하고 재시작 후 후보가 달라도 같은 실제 위치로 돌아간다', async () => {
+    const {controller, model, script} = prepare('node');
+    const first = {lineNumber: 0, columnNumber: 7};
+    const second = {lineNumber: 1, columnNumber: 6};
+    const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
+    install.onFirstCall().resolves({breakpointId: '0', actualLocation: {scriptId: script.scriptId, ...first}, getError: () => undefined});
+    install.onSecondCall().resolves({breakpointId: '1', actualLocation: {scriptId: script.scriptId, ...second}, getError: () => undefined});
+    controller.setCalibrationHandler(async () => 1);
+    controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/restarted');
+    controller.configure(async () => {
+      const restarted = prepare('node', controller);
+      (restarted.model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
+        locations: [first, second].map(location => ({scriptId: restarted.script.scriptId, ...location})),
+        getError: () => undefined,
+      });
+      await pause(restarted.model, restarted.script, first);
+    });
+
+    await pause(model, script, first);
+    await pause(model, script, second);
+    assert.isTrue(controller.canReverse(model));
+    assert.deepInclude(controller.currentPosition, second);
+    assert.deepInclude(controller.session.history.previous().target, first);
+    await controller.reverse();
+    assert.isNull(controller.session.error);
+    assert.deepInclude(controller.currentPosition, first);
+    assert.lengthOf(controller.session.history, 1);
+  });
+
+  it('보정된 위치로 다시 설치해도 실제 정지 순서가 달라지면 복원을 실패 처리한다', async () => {
+    const prepared = prepare('node');
+    const {controller, model, script} = prepared;
+    await calibrate(prepared);
+    await pause(model, script, 1);
+    controller.configure(async () => {
+      const restarted = prepare('node', controller);
+      const changed = {scriptId: restarted.script.scriptId, lineNumber: 0, columnNumber: 7};
+      (restarted.model.agent.invoke_setBreakpoint as sinon.SinonStub)
+          .onFirstCall().resolves({breakpointId: '0', actualLocation: changed, getError: () => undefined});
+      await pause(restarted.model, restarted.script, changed);
+    });
+
+    const error = await controller.reverse().then(() => null, error => error);
+    assert.include(error.message, 'Replay diverged');
+    assert.include(controller.status, 'Replay diverged');
+    assert.lengthOf(controller.session.history, 0);
+  });
+
+  for (const sharedId of [false, true]) {
+    it(`여러 후보가 같은 위치로 보정되면 ${sharedId ? '기존 ID를 보존한다' : '추가 ID만 제거한다'}`, async () => {
+      const {controller, model, script} = prepare('node');
+      const remove = model.agent.invoke_removeBreakpoint as sinon.SinonStub;
+      const first = {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7};
+      const second = {scriptId: script.scriptId, lineNumber: 1, columnNumber: 6};
+      (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
+        locations: [
+          {...first, columnNumber: 0}, {...first, columnNumber: 1}, first,
+          {...first, columnNumber: 0}, {...second, columnNumber: 0},
+        ],
+        getError: () => undefined,
+      });
+      const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
+      install.onCall(0).resolves({breakpointId: '0', actualLocation: first, getError: () => undefined});
+      install.onCall(1).resolves({breakpointId: sharedId ? '0' : 'duplicate', actualLocation: first, getError: () => undefined});
+      install.onCall(2).resolves({breakpointId: '1', actualLocation: second, getError: () => undefined});
+
+      await pause(model, script, first);
+      await pause(model, script, second);
+      assert.isNull(controller.session.error);
+      assert.lengthOf(controller.session.history, 2);
+      assert.strictEqual(controller.recordingUsage.breakpoints, 2);
+      assert.strictEqual(install.callCount, 3);
+      assert.deepEqual(remove.getCalls().map(call => call.args[0].breakpointId), sharedId ? [] : ['duplicate']);
+
+      controller.dispose();
+      assert.sameMembers(
+          remove.getCalls().map(call => call.args[0].breakpointId),
+          sharedId ? ['script-execution', '0', '1'] : ['duplicate', 'script-execution', '0', '1']);
+    });
+  }
+
+  it('설치 도중 실패하면 앞서 보정되어 설치된 중단점도 모두 제거한다', async () => {
+    const {controller, model, script} = prepare('node');
+    const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
+    install.onFirstCall().resolves({
+      breakpointId: 'shifted', actualLocation: {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7},
+      getError: () => undefined,
+    });
+    install.onSecondCall().resolves({getError: () => '중단점 설치 실패'});
+    await pause(model, script, {lineNumber: 0, columnNumber: 7});
+    assert.include(controller.status, '중단점 설치 실패');
+    assert.strictEqual(controller.recordingUsage.breakpoints, 0);
+    assert.lengthOf(controller.session.history, 0);
+    assert.sameMembers(
+        (model.agent.invoke_removeBreakpoint as sinon.SinonStub).getCalls().map(call => call.args[0].breakpointId),
+        ['script-execution', 'shifted']);
+  });
+
+  it('설치 결과가 다른 소스를 가리켜 실패해도 반환된 ID를 제거한다', async () => {
+    const {controller, model, script} = prepare('node');
+    (model.agent.invoke_setBreakpoint as sinon.SinonStub).onFirstCall().resolves({
+      breakpointId: 'wrong-script', actualLocation: {scriptId: 'other-script', lineNumber: 0, columnNumber: 0},
+      getError: () => undefined,
+    });
+    await pause(model, script, 0);
+    assert.include(controller.status, '다른 소스에 설치');
+    assert.strictEqual(controller.recordingUsage.breakpoints, 0);
+    sinon.assert.calledWith(model.agent.invoke_removeBreakpoint as sinon.SinonStub, {breakpointId: 'wrong-script'});
+  });
+
+  it('중복 ID 제거가 실패하면 오류를 알리고 해당 ID도 전체 정리에서 다시 제거한다', async () => {
+    const {controller, model, script} = prepare('node');
+    const actualLocation = {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7};
+    const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
+    install.onFirstCall().resolves({breakpointId: '0', actualLocation, getError: () => undefined});
+    install.onSecondCall().resolves({breakpointId: 'duplicate', actualLocation, getError: () => undefined});
+    const remove = model.agent.invoke_removeBreakpoint as sinon.SinonStub;
+    remove.onFirstCall().resolves({getError: () => '중복 중단점 제거 실패'});
+    await pause(model, script, actualLocation);
+    assert.include(controller.status, '중복 중단점 제거 실패');
+    assert.strictEqual(controller.recordingUsage.breakpoints, 0);
+    assert.deepEqual(
+        remove.getCalls().map(call => call.args[0].breakpointId), ['duplicate', 'script-execution', '0', 'duplicate']);
+  });
+
+  it('보정된 debugger 문에서는 Resume 중에도 사용자에게 정지를 보여 준다', async () => {
+    const {controller, model, script} = prepare('node');
+    const first = {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7};
+    const second = {scriptId: script.scriptId, lineNumber: 1, columnNumber: 6};
+    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
+      locations: [
+        {...first, columnNumber: 0},
+        {...second, columnNumber: 0, type: Protocol.Debugger.BreakLocationType.DebuggerStatement},
+      ],
+      getError: () => undefined,
+    });
+    const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
+    install.onFirstCall().resolves({breakpointId: '0', actualLocation: first, getError: () => undefined});
+    install.onSecondCall().resolves({breakpointId: '1', actualLocation: second, getError: () => undefined});
+    const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    await pause(model, script, first);
+    await model.resume();
+    model.resumedScript();
+    resume.resetHistory();
+    await pause(model, script, second);
+    sinon.assert.notCalled(resume);
+    assert.isTrue(model.isPaused());
+    assert.deepInclude(controller.currentPosition, {lineNumber: 1, columnNumber: 6});
+    assert.isNull(controller.session.error);
+  });
+
   for (const kind of ['node', 'page'] as const) {
     it(`${kind === 'node' ? 'Node' : '콘솔'}에서 과거 사용자 소스의 조회 실패도 원인과 함께 알린다`, async () => {
       const prepared = prepare(kind);
@@ -321,13 +472,14 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 });
 
-function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
-  const controller = new Replay.ReplayController.ReplayController();
+function prepare(
+    kind: Replay.ReplayEndpoint.TargetKind, controller = new Replay.ReplayController.ReplayController()) {
   controllers.add(controller);
   controller.configure(async () => {});
   const target = createTarget();
   const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
   sinon.stub(model.agent, 'invoke_setPauseOnExceptions').resolves({getError: () => undefined});
+  sinon.stub(model.agent, 'invoke_removeBreakpoint').resolves({getError: () => undefined});
   sinon.stub(model.agent, 'invoke_setInstrumentationBreakpoint').resolves({
     breakpointId: 'script-execution' as Protocol.Debugger.BreakpointId, getError: () => undefined,
   });
@@ -371,12 +523,15 @@ function recordConsoleCommand(target: SDK.Target.Target, expression: string): vo
 }
 
 async function pause(
-    model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script, lineNumber: number,
-    reason = Protocol.Debugger.PausedEventReason.Other, breakpointIds: string[] = [String(lineNumber)]): Promise<void> {
+    model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script,
+    position: number|{lineNumber: number, columnNumber: number},
+    reason = Protocol.Debugger.PausedEventReason.Other,
+    breakpointIds: string[] = [String(typeof position === 'number' ? position : position.lineNumber)]): Promise<void> {
+  const location = typeof position === 'number' ? {lineNumber: position, columnNumber: 0} : position;
   await model.pausedScript([{
     callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
     functionName: '',
-    location: {scriptId: script.scriptId, lineNumber, columnNumber: 0},
+    location: {scriptId: script.scriptId, ...location},
     url: script.sourceURL,
     scopeChain: [],
     this: {type: Protocol.Runtime.RemoteObjectType.Object},

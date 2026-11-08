@@ -162,7 +162,22 @@ export const WASM_SYMBOLS_PRIORITY = [
   Protocol.Debugger.DebugSymbolsType.SourceMap,
 ];
 
+export type ExecutionCommand = 'resume'|'step-into'|'step-over'|'step-out'|'pause'|'skip-pauses';
+
 export class DebuggerModel extends SDKModel<EventTypes> {
+  #pauseInterceptor: ((details: DebuggerPausedDetails) => Promise<boolean>)|null = null;
+  #executionInterceptor: ((command: ExecutionCommand) => boolean)|null = null;
+  #internalPause = false;
+
+  // An internal recording pause is consumed before bindings and UI see it.
+  setPauseInterceptor(interceptor: ((details: DebuggerPausedDetails) => Promise<boolean>)|null): void {
+    this.#pauseInterceptor = interceptor;
+  }
+
+  setExecutionInterceptor(interceptor: ((command: ExecutionCommand) => boolean)|null): void {
+    this.#executionInterceptor = interceptor;
+  }
+
   readonly agent: ProtocolProxyApi.DebuggerApi;
   runtimeModelInternal: RuntimeModel;
   readonly #sourceMapManagerInternal: SourceMapManager<Script>;
@@ -401,6 +416,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   }
 
   skipAllPausesUntilReloadOrTimeout(timeout: number): void {
+    this.#executionInterceptor?.('skip-pauses');
     if (this.#skipAllPausesTimeout) {
       clearTimeout(this.#skipAllPausesTimeout);
     }
@@ -461,17 +477,26 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   }
 
   async stepInto(): Promise<void> {
+    if (this.#executionInterceptor?.('step-into')) {
+      return;
+    }
     const skipList = await this.computeAutoStepSkipList(StepMode.STEP_INTO);
     void this.agent.invoke_stepInto({breakOnAsyncCall: false, skipList});
   }
 
   async stepOver(): Promise<void> {
+    if (this.#executionInterceptor?.('step-over')) {
+      return;
+    }
     this.#autoSteppingContext = this.#debuggerPausedDetailsInternal?.callFrames[0]?.functionLocation() ?? null;
     const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OVER);
     void this.agent.invoke_stepOver({skipList});
   }
 
   async stepOut(): Promise<void> {
+    if (this.#executionInterceptor?.('step-out')) {
+      return;
+    }
     const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OUT);
     if (skipList.length !== 0) {
       void this.agent.invoke_stepOver({skipList});
@@ -481,17 +506,26 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   }
 
   scheduleStepIntoAsync(): void {
+    if (this.#executionInterceptor?.('step-into')) {
+      return;
+    }
     void this.computeAutoStepSkipList(StepMode.STEP_INTO).then(skipList => {
       void this.agent.invoke_stepInto({breakOnAsyncCall: true, skipList});
     });
   }
 
   resume(): void {
+    if (this.#executionInterceptor?.('resume')) {
+      return;
+    }
     void this.agent.invoke_resume({terminateOnResume: false});
     this.#isPausingInternal = false;
   }
 
   pause(): void {
+    if (this.#executionInterceptor?.('pause')) {
+      return;
+    }
     this.#isPausingInternal = true;
     this.skipAllPauses(false);
     void this.agent.invoke_pause();
@@ -686,6 +720,18 @@ export class DebuggerModel extends SDKModel<EventTypes> {
 
     const pausedDetails =
         new DebuggerPausedDetails(this, callFrames, reason, auxData, breakpointIds, asyncStackTrace, asyncStackTraceId);
+    if (this.#pauseInterceptor) {
+      // Set before awaiting: an internal resume may arrive during the callback.
+      this.#internalPause = true;
+      try {
+        if (await this.#pauseInterceptor(pausedDetails)) {
+          return;
+        }
+      } catch (error) {
+        console.error(error);
+      }
+      this.#internalPause = false;
+    }
     await this.#expandCallFrames(pausedDetails);
 
     if (this.continueToLocationCallback) {
@@ -735,6 +781,10 @@ export class DebuggerModel extends SDKModel<EventTypes> {
   }
 
   resumedScript(): void {
+    if (this.#internalPause) {
+      this.#internalPause = false;
+      return;
+    }
     this.resetDebuggerPausedDetails();
     this.dispatchEventToListeners(Events.DebuggerResumed, this);
   }

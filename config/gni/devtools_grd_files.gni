@@ -1055,6 +1055,7 @@ grd_files_debug_sources = [
   "front_end/models/replay/ReplayConnection.js",
   "front_end/models/replay/ReplayController.js",
   "front_end/models/replay/ReplayEndpoint.js",
+  "front_end/models/replay/ReplayLimits.js",
   "front_end/models/replay/ReplaySession.js",
   "front_end/models/source_map_scopes/NamesResolver.js",
   "front_end/models/source_map_scopes/ScopeChainModel.js",

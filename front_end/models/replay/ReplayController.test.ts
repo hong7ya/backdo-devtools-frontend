@@ -9,7 +9,15 @@ import {describeWithMockConnection, dispatchEvent} from '../../testing/MockConne
 
 import * as Replay from './replay.js';
 
+const controllers = new Set<Replay.ReplayController.ReplayController>();
+
 describeWithMockConnection('공통 재실행 제어기', () => {
+  afterEach(() => {
+    for (const controller of controllers) {
+      controller.dispose();
+    }
+    controllers.clear();
+  });
   it('재시작 연동이 없어도 위치 기록을 유지하고 뒤로가기만 비활성화한다', async () => {
     const {controller, model, script} = prepare('node');
     await pause(model, script, 0);
@@ -43,6 +51,46 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isFalse(controller.canReverse(model));
   });
 
+  it('콘솔 원문 용량 한도에 도달하면 원문과 위치를 함께 해제한다', () => {
+    const {controller, target} = prepare('page');
+    recordConsoleCommand(target, 'const first = 1;');
+    assert.strictEqual(controller.inputCount, 1);
+    recordConsoleCommand(target, 'x'.repeat(Replay.ReplayLimits.REPLAY_LIMITS.consoleBytes / 2 + 1));
+    assert.include(controller.session.error ?? '', '콘솔 입력 기록 한도');
+    assert.strictEqual(controller.inputCount, 0);
+    assert.lengthOf(controller.session.history, 0);
+  });
+
+  it('실행 컨텍스트가 교체되면 이전 입력과 위치를 비우고 새 기록을 받는다', () => {
+    const {controller, target, model} = prepare('page');
+    recordConsoleCommand(target, 'const first = 1;');
+    model.globalObjectCleared();
+    assert.strictEqual(controller.inputCount, 0);
+    assert.lengthOf(controller.session.history, 0);
+    assert.isNull(controller.session.error);
+    recordConsoleCommand(target, 'const next = 2;');
+    assert.strictEqual(controller.inputCount, 1);
+  });
+
+  it('새 입력이 있으면 보관 시간을 연장하고 마지막 활동 30분 뒤에 해제한다', async () => {
+    const clock = sinon.useFakeTimers();
+    const {controller, target} = prepare('page');
+    try {
+      recordConsoleCommand(target, 'const first = 1;');
+      await clock.tickAsync(29 * 60 * 1000);
+      recordConsoleCommand(target, 'const second = 2;');
+      await clock.tickAsync(2 * 60 * 1000);
+      assert.strictEqual(controller.inputCount, 2);
+      assert.isNull(controller.session.error);
+      await clock.tickAsync(28 * 60 * 1000);
+      assert.strictEqual(controller.inputCount, 0);
+      assert.include(controller.session.error ?? '', '30분');
+    } finally {
+      controller.dispose();
+      clock.restore();
+    }
+  });
+
   it('새 연결이 응답하지 않아도 제한 시간이 지나면 작업 중 상태를 해제한다', async () => {
     const clock = sinon.useFakeTimers();
     let finishConnect: (() => void)|undefined;
@@ -70,6 +118,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
 
 function prepare(kind: Replay.ReplayEndpoint.TargetKind) {
   const controller = new Replay.ReplayController.ReplayController();
+  controllers.add(controller);
   controller.configure(kind, async () => {});
   const target = createTarget();
   const model = target.model(SDK.DebuggerModel.DebuggerModel)!;

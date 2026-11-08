@@ -13,6 +13,7 @@ devtools_module("replay") {
     "ReplayConnection.ts",
     "ReplayController.ts",
     "ReplayEndpoint.ts",
+    "ReplayLimits.ts",
     "ReplaySession.ts",
   ]
   deps = [

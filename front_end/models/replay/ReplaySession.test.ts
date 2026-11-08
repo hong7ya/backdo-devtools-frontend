@@ -45,7 +45,7 @@ describe('재실행 세션', () => {
     assert.strictEqual(session.recordPause(pause(3, 4, true)), 'show');
   });
 
-  it('재실행 경로가 달라지면 기존 이력을 유지한 채 실패 처리한다', () => {
+  it('재실행 경로가 달라지면 실패 이유만 남기고 이력을 해제한다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0));
     session.recordPause(pause(1));
@@ -54,8 +54,20 @@ describe('재실행 세션', () => {
     session.fail(new Error('다른 실행 경로'));
     assert.strictEqual(session.error, '다른 실행 경로');
     assert.isFalse(session.canReverse);
-    assert.lengthOf(session.history, 2);
+    assert.lengthOf(session.history, 0);
     assert.throws(() => session.beginExecution('resume'), /다른 실행 경로/);
+  });
+
+  it('새 실행 컨텍스트에서는 이전 실패와 복원 계획까지 초기화한다', () => {
+    const session = new ReplaySession();
+    session.recordPause(pause(0));
+    session.recordPause(pause(1));
+    session.fail(new Error('이전 실행 실패'));
+    session.reset();
+    assert.isNull(session.error);
+    assert.isFalse(session.replaying);
+    assert.lengthOf(session.history, 0);
+    assert.strictEqual(session.recordPause(pause(9)), 'show');
   });
 
   it('기록 대상 밖의 정지와 재실행 중에는 뒤로가기를 허용하지 않는다', () => {

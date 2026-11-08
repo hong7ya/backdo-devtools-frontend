@@ -80,7 +80,18 @@ export class ReplaySession {
     this.#isAtRecordedPause = false;
   }
 
+  reset(): void {
+    this.history.clear();
+    this.#replayPlan = null;
+    this.#failureReason = null;
+    this.#isAtRecordedPause = false;
+    this.#executionCommand = 'step-into';
+    this.#stepStartDepth = 0;
+    this.#currentDepth = 0;
+  }
+
   fail(error: unknown): void {
+    this.history.clear();
     this.#failureReason = error instanceof Error ? error.message : String(error);
     this.#replayPlan = null;
     this.#isAtRecordedPause = false;

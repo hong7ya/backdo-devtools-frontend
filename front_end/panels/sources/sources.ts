@@ -19,6 +19,7 @@ import * as NavigatorView from './NavigatorView.js';
 import * as OpenFileQuickOpen from './OpenFileQuickOpen.js';
 import * as OutlineQuickOpen from './OutlineQuickOpen.js';
 import * as Plugin from './Plugin.js';
+import * as ReplayToolbar from './ReplayToolbar.js';
 import * as ResourceOriginPlugin from './ResourceOriginPlugin.js';
 import * as ScopeChainSidebarPane from './ScopeChainSidebarPane.js';
 import * as SearchSourcesView from './SearchSourcesView.js';
@@ -50,6 +51,7 @@ export {
   OpenFileQuickOpen,
   OutlineQuickOpen,
   Plugin,
+  ReplayToolbar,
   ResourceOriginPlugin,
   ScopeChainSidebarPane,
   SearchSourcesView,

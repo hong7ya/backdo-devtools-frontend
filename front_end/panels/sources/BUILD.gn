@@ -156,6 +156,7 @@ ts_library("unittests") {
     "FilteredUISourceCodeListProvider.test.ts",
     "NavigatorView.test.ts",
     "OutlineQuickOpen.test.ts",
+    "ReplayToolbar.test.ts",
     "ResourceOriginPlugin.test.ts",
     "SourcesNavigator.test.ts",
     "SourcesView.test.ts",

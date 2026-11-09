@@ -13,7 +13,7 @@ import {addBreakpointForLine, getLineNumberElement, removeBreakpointForLine} fro
 import {enterConsoleCode} from './BrowserTestActions.js';
 import {BrowserTestEnvironment, type TestSession} from './BrowserTestEnvironment.js';
 
-const RECORDING_METER = 'pierce/[role="meter"][aria-label="기록 한도 사용률"]';
+const RECORDING_METER = 'pierce/[role="meter"][aria-label="CDP 처리 시간 예산 사용률"]';
 const LOADING = 'pierce/.backdo-replay-loading:not([hidden])';
 const REVERSE_BUTTON = 'pierce/[data-backdo-action="reverse"]';
 const UI_TIMEOUT_MS = 15_000;
@@ -418,10 +418,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     const initialState = await page.evaluate(() => window.backdoTest.snapshot());
     const meter = await page.waitForSelector(RECORDING_METER);
     if (!meter) {
-      assert.fail('기록 한도 사용률이 보여야 한다');
+      assert.fail('CDP 처리 시간 예산 사용률이 보여야 한다');
     }
-    assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')),
-        `실행 위치 ${historyLength.toLocaleString('ko-KR')} /`);
+    const previousUsage = Number(await meter.evaluate(element => element.getAttribute('aria-valuenow')));
+    assert.isAbove(previousUsage, 0);
+    assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')), 'CDP 처리 시간 예산');
 
     const startedAt = performance.now();
     await clickReverse(page);
@@ -431,8 +432,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     const result = await page.evaluate(() => window.backdoTest.snapshot());
     assert.isNull(result.error);
     assert.isNull(await page.$(LOADING));
-    assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')),
-        `실행 위치 ${(historyLength - 1).toLocaleString('ko-KR')} /`);
+    assert.closeTo(
+        Number(await meter.evaluate(element => element.getAttribute('aria-valuenow'))),
+        previousUsage * (historyLength - 1) / historyLength, 0.000001);
     assert.closeTo(
         result.estimatedReplayMs ?? Infinity,
         (initialState.estimatedReplayMs ?? 0) * (historyLength - 1) / historyLength, 0.000001,

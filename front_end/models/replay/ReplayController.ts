@@ -7,13 +7,7 @@ import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
 import {type ExecutionPosition, samePosition} from './ExecutionHistory.js';
-import {
-  RECORDING_LIMIT_MESSAGE,
-  type RecordingUsage,
-  REPLAY_LIMITS,
-  REPLAY_RESPONSE_BUDGET_MS,
-  REPLAY_TIME_LIMIT_MESSAGE,
-} from './ReplayLimits.js';
+import {REPLAY_RESPONSE_BUDGET_MS, REPLAY_TIME_LIMIT_MESSAGE} from './ReplayLimits.js';
 import {ReplaySession} from './ReplaySession.js';
 import {ReplayTiming} from './ReplayTiming.js';
 
@@ -64,7 +58,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #scripts = new Map<string, RecordedScript>();
   #consoleSources = new Map<string, Promise<string|null>>();
   #consoleInputs: ConsoleInput[] = [];
-  #consoleBytes = 0;
   #activeConsoleInput: number|null = null;
   #replayGeneration = 0;
   #replayInputCount = 0;
@@ -124,11 +117,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#notifyStatusChanged();
   }
 
-  get recordingUsage(): RecordingUsage {
+  get recordingUsage(): {positions: number, consoleInputs: number, breakpoints: number, pendingSources: number} {
     return {
       positions: this.session.history.length,
       consoleInputs: this.#consoleInputs.length,
-      consoleBytes: this.#consoleBytes,
       breakpoints: this.#recordingBreakpointIds.size,
       pendingSources: this.#consoleSources.size,
     };
@@ -348,13 +340,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return;
     }
     const {expression, useCommandLineAPI, userGesture} = command;
-    const bytes = expression.length * 2;
-    if (this.#consoleInputs.length >= REPLAY_LIMITS.consoleInputs ||
-        this.#consoleBytes + bytes > REPLAY_LIMITS.consoleBytes) {
-      this.fail(new Error(RECORDING_LIMIT_MESSAGE));
-      return;
-    }
-    this.#consoleBytes += bytes;
     this.#activeConsoleInput = this.#consoleInputs.length;
     this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
     this.#notifyStatusChanged();
@@ -370,10 +355,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     const input = this.#consoleInputs[index];
     if (!input) {
-      return;
-    }
-    if (this.#consoleSources.size >= REPLAY_LIMITS.pendingSources) {
-      this.fail(new Error(RECORDING_LIMIT_MESSAGE));
       return;
     }
     // VM 번호와 scriptId는 재연결마다 달라진다. 원문이 일치하는 입력 순번으로 비교한다.
@@ -558,9 +539,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   async #installRecordingBreakpoint(
       script: SDK.Script.Script, location: Protocol.Debugger.Location, positions: Set<string>): Promise<string> {
-    if (this.#recordingBreakpointIds.size >= REPLAY_LIMITS.breakpoints) {
-      throw new Error(RECORDING_LIMIT_MESSAGE);
-    }
     const agent = script.debuggerModel.agent;
     const breakpoint = await agent.invoke_setBreakpoint({location});
     const error = breakpoint.getError();
@@ -657,7 +635,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#replayedPositions++;
         if (!this.session.replaying) {
           this.#consoleInputs.splice(this.#replayInputCount);
-          this.#consoleBytes = this.#consoleInputs.reduce((sum, input) => sum + input.expression.length * 2, 0);
         }
       }
       this.#notifyUsageChanged();
@@ -714,7 +691,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#replayGeneration++;
     this.session.history.clear();
     this.#consoleInputs = [];
-    this.#consoleBytes = 0;
     this.#consoleSources.clear();
     this.#scripts.clear();
     this.#activeConsoleInput = null;

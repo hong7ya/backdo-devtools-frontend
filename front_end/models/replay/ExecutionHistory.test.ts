@@ -61,14 +61,20 @@ describe('실행 위치 기록', () => {
     assert.deepEqual(history.previous().target, at(0, 0));
   });
 
-  it('빈 기록·유효하지 않은 위치·기록 한도를 거부한다', () => {
-    const history = new ExecutionHistory(2);
+  it('빈 기록과 유효하지 않은 위치를 거부한다', () => {
+    const history = new ExecutionHistory();
     assert.isFalse(history.canReverse);
     assert.throws(() => history.previous(), /No previous/);
     assert.throws(() => history.record(at(0, 0, '')), /unstable/);
-    history.record(at(0, 0));
-    history.record(at(1, 0));
-    assert.throws(() => history.record(at(2, 0)), /기록 한도/);
-    assert.lengthOf(history, 2);
+    assert.lengthOf(history, 0);
+  });
+
+  it('방문 횟수의 고정 상한 없이 이전 위치를 유지한다', () => {
+    const history = new ExecutionHistory();
+    for (let index = 0; index <= 100_000; index++) {
+      history.record(at(index, 0));
+    }
+    assert.lengthOf(history, 100_001);
+    assert.deepEqual(history.previous().target, at(99_999, 0));
   });
 });

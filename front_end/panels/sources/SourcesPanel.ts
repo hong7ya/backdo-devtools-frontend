@@ -757,7 +757,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
 
   private updateReplayUsage(): void {
     const replay = Replay.ReplayController.ReplayController.instance();
-    this.#replayToolbar?.updateUsage(replay.recordingUsage, replay.session.error, replay.estimatedReplayMs);
+    this.#replayToolbar?.updateUsage(replay.session.error, replay.estimatedReplayMs);
   }
 
   private updateDebuggerButtonsAndStatusForTest(): void {

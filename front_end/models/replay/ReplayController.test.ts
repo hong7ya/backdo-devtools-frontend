@@ -354,17 +354,20 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.strictEqual(controller.recordingUsage.positions, 0);
   });
 
-  it('콘솔 원문 용량 한도에 도달하면 원문과 위치를 함께 해제한다', () => {
-    const {controller, target} = prepare('console');
-    recordConsoleCommand(target, 'const first = 1;');
-    assert.strictEqual(controller.inputCount, 1);
-    recordConsoleCommand(target, 'x'.repeat(Replay.ReplayLimits.REPLAY_LIMITS.consoleBytes / 2 + 1));
-    assert.strictEqual(controller.recordingUsage.consoleBytes, 0);
-    assert.strictEqual(controller.recordingUsage.positions, 0);
-    assert.include(controller.status, '실행 기록 한도');
-    assert.include(controller.status, '세션을 다시 시작');
-    assert.strictEqual(controller.inputCount, 0);
-    assert.lengthOf(controller.session.history, 0);
+  it('Console 입력·원문·소스 수의 고정 상한으로 기록을 종료하지 않는다', async () => {
+    const {controller, target, model, expression} = prepare('console');
+    for (let index = 0; index < 257; index++) {
+      recordConsoleCommand(target, expression);
+      const script = new SDK.Script.Script(
+          model, String(index) as Protocol.Runtime.ScriptId, '' as SDK.Script.Script['sourceURL'], 0, 0, 1, 16, 1,
+          'hash', false, false, undefined, false, expression.length, null, null, null, null, null, null);
+      model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
+    }
+    await Promise.resolve();
+    recordConsoleCommand(target, 'x'.repeat(2 * 1024 * 1024 + 1));
+    assert.isNull(controller.session.error);
+    assert.strictEqual(controller.inputCount, 258);
+    assert.strictEqual(controller.recordingUsage.pendingSources, 257);
   });
 
   it('사용자 대기는 기록을 유지하고 예상 CDP 처리가 3초에 도달하면 기록 전체를 종료한다', async () => {

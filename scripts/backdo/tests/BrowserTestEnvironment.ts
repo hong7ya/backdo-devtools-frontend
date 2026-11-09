@@ -11,6 +11,7 @@ import puppeteer, {type Browser, type Page} from 'puppeteer-core';
 import {defaultChromePath} from '../../../test/conductor/paths.js';
 
 import {enterConsoleCode} from './BrowserTestActions.js';
+import type {} from './BrowserTestProtocol.js';
 import {serveTestFrontend} from './FrontendTestServer.js';
 import {NodeTestTarget} from './NodeTestTarget.js';
 

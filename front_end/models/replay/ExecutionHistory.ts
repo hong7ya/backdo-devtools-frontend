@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {RECORDING_LIMIT_MESSAGE, REPLAY_LIMITS} from './ReplayLimits.js';
-
 /** 프로세스가 바뀌어도 비교할 수 있는 위치 정보다. scriptId나 런타임 객체 ID는 기록하지 않는다. */
 export interface ExecutionPosition {
   readonly url: string;
@@ -57,11 +55,6 @@ export class ReplayPlan {
 /** 실행 위치만 기록한다. 지역 변수, 힙, 클로저, 반환값, 외부 입력은 저장하지 않는다. */
 export class ExecutionHistory {
   #positions: ExecutionPosition[] = [];
-  readonly #limit: number;
-
-  constructor(limit: number = REPLAY_LIMITS.positions) {
-    this.#limit = limit;
-  }
 
   get length(): number {
     return this.#positions.length;
@@ -75,9 +68,6 @@ export class ExecutionHistory {
     if (!position.url || !position.hash || !Number.isInteger(position.lineNumber) || position.lineNumber < 0 ||
         !Number.isInteger(position.columnNumber) || position.columnNumber < 0) {
       throw new Error('Cannot record an unstable or invalid source position');
-    }
-    if (this.#positions.length >= this.#limit) {
-      throw new Error(RECORDING_LIMIT_MESSAGE);
     }
     this.#positions.push(Object.freeze({...position}));
   }

@@ -11,9 +11,14 @@ describeWithEnvironment('Console과 Node의 공통 연결', () => {
     const connection = new Replay.ReplayConnection.ReplayConnection(new Replay.ReplayController.ReplayController());
     const fetch = sinon.stub(window, 'fetch').rejects();
     const onTargetCreated = sinon.spy();
-    const connected = await connection.initialize({
-      kind: 'console', name: 'main', onTargetCreated, onConnectionLost: sinon.spy(),
-    }, new URL('http://backdo.test/gen/front_end/inspector.html?ws=127.0.0.1:9222/id'));
+    const connected = await connection.initialize(
+        {
+          kind: 'console',
+          name: 'main',
+          onTargetCreated,
+          onConnectionLost: sinon.spy(),
+        },
+        new URL('http://backdo.test/gen/front_end/inspector.html?ws=127.0.0.1:9222/id'));
 
     assert.isFalse(connected);
     sinon.assert.notCalled(fetch);

@@ -46,7 +46,8 @@ export class UserBreakpoints {
     try {
       await finishUpdates([...this.#updates.values()].map(update => Promise.resolve().then(update)));
     } catch (error) {
-      throw new AggregateError([error],
+      throw new AggregateError(
+          [error],
           suspended ? '사용자 중단점을 잠시 해제하지 못했습니다.' : '사용자 중단점을 다시 적용하지 못했습니다.');
     } finally {
       this.#updating = false;

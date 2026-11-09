@@ -28,8 +28,8 @@ export class ReplayPlan {
     if (!positions.length) {
       throw new Error('No previous recorded position');
     }
-    this.positions = Object.freeze(
-        positions.map(position => Object.isFrozen(position) ? position : Object.freeze({...position})));
+    this.positions =
+        Object.freeze(positions.map(position => Object.isFrozen(position) ? position : Object.freeze({...position})));
   }
 
   get target(): ExecutionPosition {

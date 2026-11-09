@@ -34,8 +34,10 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const first = {lineNumber: 0, columnNumber: 7};
     const second = {lineNumber: 1, columnNumber: 6};
     const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
-    install.onFirstCall().resolves({breakpointId: '0', actualLocation: {scriptId: script.scriptId, ...first}, getError: () => undefined});
-    install.onSecondCall().resolves({breakpointId: '1', actualLocation: {scriptId: script.scriptId, ...second}, getError: () => undefined});
+    install.onFirstCall().resolves(
+        {breakpointId: '0', actualLocation: {scriptId: script.scriptId, ...first}, getError: () => undefined});
+    install.onSecondCall().resolves(
+        {breakpointId: '1', actualLocation: {scriptId: script.scriptId, ...second}, getError: () => undefined});
     controller.setCalibrationHandler(async () => 1);
     controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/restarted');
     controller.configure(async () => {
@@ -67,7 +69,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       const restarted = prepare('node', controller);
       const changed = {scriptId: restarted.script.scriptId, lineNumber: 0, columnNumber: 7};
       (restarted.model.agent.invoke_setBreakpoint as sinon.SinonStub)
-          .onFirstCall().resolves({breakpointId: '0', actualLocation: changed, getError: () => undefined});
+          .onFirstCall()
+          .resolves({breakpointId: '0', actualLocation: changed, getError: () => undefined});
       await pause(restarted.model, restarted.script, changed);
     });
 
@@ -85,14 +88,18 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       const second = {scriptId: script.scriptId, lineNumber: 1, columnNumber: 6};
       (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
         locations: [
-          {...first, columnNumber: 0}, {...first, columnNumber: 1}, first,
-          {...first, columnNumber: 0}, {...second, columnNumber: 0},
+          {...first, columnNumber: 0},
+          {...first, columnNumber: 1},
+          first,
+          {...first, columnNumber: 0},
+          {...second, columnNumber: 0},
         ],
         getError: () => undefined,
       });
       const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
       install.onCall(0).resolves({breakpointId: '0', actualLocation: first, getError: () => undefined});
-      install.onCall(1).resolves({breakpointId: sharedId ? '0' : 'duplicate', actualLocation: first, getError: () => undefined});
+      install.onCall(1).resolves(
+          {breakpointId: sharedId ? '0' : 'duplicate', actualLocation: first, getError: () => undefined});
       install.onCall(2).resolves({breakpointId: '1', actualLocation: second, getError: () => undefined});
 
       await pause(model, script, first);
@@ -114,7 +121,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const {controller, model, script} = prepare('node');
     const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
     install.onFirstCall().resolves({
-      breakpointId: 'shifted', actualLocation: {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7},
+      breakpointId: 'shifted',
+      actualLocation: {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7},
       getError: () => undefined,
     });
     install.onSecondCall().resolves({getError: () => '중단점 설치 실패'});
@@ -130,7 +138,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   it('설치 결과가 다른 소스를 가리켜 실패해도 반환된 ID를 제거한다', async () => {
     const {controller, model, script} = prepare('node');
     (model.agent.invoke_setBreakpoint as sinon.SinonStub).onFirstCall().resolves({
-      breakpointId: 'wrong-script', actualLocation: {scriptId: 'other-script', lineNumber: 0, columnNumber: 0},
+      breakpointId: 'wrong-script',
+      actualLocation: {scriptId: 'other-script', lineNumber: 0, columnNumber: 0},
       getError: () => undefined,
     });
     await pause(model, script, 0);
@@ -185,8 +194,9 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       const prepared = prepare(kind);
       const {controller, model, script, target, expression} = prepared;
       const expired = new SDK.Script.Script(
-          model, 'expired' as Protocol.Runtime.ScriptId, 'https://example.test/finished.js' as SDK.Script.Script['sourceURL'],
-          0, 0, 1, 16, 1, 'expired-hash', false, false, undefined, false, 24, null, null, null, null, null, null);
+          model, 'expired' as Protocol.Runtime.ScriptId,
+          'https://example.test/finished.js' as SDK.Script.Script['sourceURL'], 0, 0, 1, 16, 1, 'expired-hash', false,
+          false, undefined, false, 24, null, null, null, null, null, null);
       sinon.stub(model, 'scripts').returns([expired]);
       (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub)
           .withArgs(sinon.match({start: sinon.match({scriptId: expired.scriptId})}))
@@ -209,14 +219,15 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const {controller, model, script} = prepared;
     const internal = new SDK.Script.Script(
         model, 'internal' as Protocol.Runtime.ScriptId,
-        'backdo-internal:///restore-launch-context.js' as SDK.Script.Script['sourceURL'],
-        0, 0, 1, 16, 1, 'internal-hash', false, false, undefined, true, 24, null, null, null, null, null, null);
+        'backdo-internal:///restore-launch-context.js' as SDK.Script.Script['sourceURL'], 0, 0, 1, 16, 1,
+        'internal-hash', false, false, undefined, true, 24, null, null, null, null, null, null);
     sinon.stub(model, 'scripts').returns([internal, script]);
     await calibrate(prepared);
     const usage = controller.recordingUsage;
     (model.scriptForId as sinon.SinonStub).returns(internal);
     sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
-    await model.pausedScript([], Protocol.Debugger.PausedEventReason.Instrumentation, {scriptId: internal.scriptId}, []);
+    await model.pausedScript(
+        [], Protocol.Debugger.PausedEventReason.Instrumentation, {scriptId: internal.scriptId}, []);
     const requests = (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).getCalls();
     assert.isFalse(requests.some(call => call.args[0].start.scriptId === internal.scriptId));
     assert.deepEqual(controller.recordingUsage, usage);
@@ -259,7 +270,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const {controller, model, script} = prepare('node');
     const startReason = 'Break on start' as Protocol.Debugger.PausedEventReason;
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
-      locations: [{scriptId: script.scriptId, lineNumber: 1, columnNumber: 0}], getError: () => undefined,
+      locations: [{scriptId: script.scriptId, lineNumber: 1, columnNumber: 0}],
+      getError: () => undefined,
     });
     controller.setCalibrationHandler(async () => 1);
     controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/restarted');
@@ -413,7 +425,9 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     controller.setRestartHandler(restart);
     controller.setCalibrationHandler(cancellation => {
       signal = cancellation;
-      return new Promise(resolve => { finish = resolve; });
+      return new Promise(resolve => {
+        finish = resolve;
+      });
     });
     await pause(model, script, 0);
     assert.isTrue(controller.calibrating);
@@ -451,8 +465,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       const {controller, model, script} = prepared;
       await calibrate(prepared);
       controller.configure(() => new Promise<void>(resolve => {
-        finishConnect = resolve;
-      }));
+                             finishConnect = resolve;
+                           }));
       await pause(model, script, 1);
       await pause(model, script, 0);
       await pause(model, script, 1);
@@ -475,8 +489,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 });
 
-function prepare(
-    kind: Replay.ReplayEndpoint.TargetKind, controller = new Replay.ReplayController.ReplayController()) {
+function prepare(kind: Replay.ReplayEndpoint.TargetKind, controller = new Replay.ReplayController.ReplayController()) {
   controllers.add(controller);
   controller.configure(async () => {});
   const target = createTarget();
@@ -484,23 +497,28 @@ function prepare(
   sinon.stub(model.agent, 'invoke_setPauseOnExceptions').resolves({getError: () => undefined});
   sinon.stub(model.agent, 'invoke_removeBreakpoint').resolves({getError: () => undefined});
   sinon.stub(model.agent, 'invoke_setInstrumentationBreakpoint').resolves({
-    breakpointId: 'script-execution' as Protocol.Debugger.BreakpointId, getError: () => undefined,
+    breakpointId: 'script-execution' as Protocol.Debugger.BreakpointId,
+    getError: () => undefined,
   });
   const scriptId = 'script' as Protocol.Runtime.ScriptId;
   const expression = 'debugger;\nconst value = 1;';
   const url = (kind === 'node' ? 'file:///user-cli.js' : '') as SDK.Script.Script['sourceURL'];
   const script = new SDK.Script.Script(
-      model, scriptId, url, 0, 0, 1, 16, 1, 'hash', false, false, undefined, false, expression.length, null, null,
-      null, null, null, null);
+      model, scriptId, url, 0, 0, 1, 16, 1, 'hash', false, false, undefined, false, expression.length, null, null, null,
+      null, null, null);
   sinon.stub(model.agent, 'invoke_getScriptSource').resolves({scriptSource: expression, getError: () => undefined});
   sinon.stub(model, 'scriptForId').returns(script);
   sinon.stub(model.agent, 'invoke_getPossibleBreakpoints').resolves({
-    locations: [0, 1].map(lineNumber => ({scriptId, lineNumber, columnNumber: 0})), getError: () => undefined,
+    locations: [0, 1].map(lineNumber => ({scriptId, lineNumber, columnNumber: 0})),
+    getError: () => undefined,
   });
   let id = 0;
   sinon.stub(model.agent, 'invoke_setBreakpoint').callsFake(async ({location}) => ({
-    breakpointId: String(id++) as Protocol.Debugger.BreakpointId, actualLocation: location, getError: () => undefined,
-  }));
+                                                              breakpointId: String(id++) as
+                                                                  Protocol.Debugger.BreakpointId,
+                                                              actualLocation: location,
+                                                              getError: () => undefined,
+                                                            }));
   controller.attach(target);
   return {controller, target, model, script, expression};
 }
@@ -520,23 +538,28 @@ function recordConsoleCommand(target: SDK.Target.Target, expression: string): vo
     context: {id: 1, origin: '', name: '', uniqueId: 'context', auxData: {isDefault: true}},
   });
   const context = target.model(SDK.RuntimeModel.RuntimeModel)!.defaultExecutionContext()!;
-  target.model(SDK.ConsoleModel.ConsoleModel)!.dispatchEventToListeners(SDK.ConsoleModel.Events.CommandWillBeEvaluated, {
-    executionContext: context, expression, useCommandLineAPI: true, userGesture: false,
-  });
+  target.model(SDK.ConsoleModel.ConsoleModel)!.dispatchEventToListeners(
+      SDK.ConsoleModel.Events.CommandWillBeEvaluated, {
+        executionContext: context,
+        expression,
+        useCommandLineAPI: true,
+        userGesture: false,
+      });
 }
 
 async function pause(
     model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script,
-    position: number|{lineNumber: number, columnNumber: number},
-    reason = Protocol.Debugger.PausedEventReason.Other,
+    position: number|{lineNumber: number, columnNumber: number}, reason = Protocol.Debugger.PausedEventReason.Other,
     breakpointIds: string[] = [String(typeof position === 'number' ? position : position.lineNumber)]): Promise<void> {
   const location = typeof position === 'number' ? {lineNumber: position, columnNumber: 0} : position;
-  await model.pausedScript([{
-    callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
-    functionName: '',
-    location: {scriptId: script.scriptId, ...location},
-    url: script.sourceURL,
-    scopeChain: [],
-    this: {type: Protocol.Runtime.RemoteObjectType.Object},
-  }], reason, undefined, breakpointIds);
+  await model.pausedScript(
+      [{
+        callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
+        functionName: '',
+        location: {scriptId: script.scriptId, ...location},
+        url: script.sourceURL,
+        scopeChain: [],
+        this: {type: Protocol.Runtime.RemoteObjectType.Object},
+      }],
+      reason, undefined, breakpointIds);
 }

@@ -40,6 +40,5 @@ export interface BrowserTestClient {
 declare global {
   interface Window {
     backdoTest: BrowserTestClient;
-
   }
 }

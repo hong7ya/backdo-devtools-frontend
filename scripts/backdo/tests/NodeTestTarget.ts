@@ -65,7 +65,9 @@ export class NodeTestTarget {
   #spawnTarget(): TargetProcess {
     const {entry, args = [], cwd = process.cwd()} = this.#options;
     const child = spawn(process.execPath, [`--inspect-brk=127.0.0.1:${this.#inspectorPort}`, entry, ...args], {
-      cwd, env: this.#options.env, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd,
+      env: this.#options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.resume();
     return child;
@@ -114,8 +116,8 @@ export class NodeTestTarget {
     }
     const targets: unknown = await response.json();
     const ownedTarget = Array.isArray(targets) && targets.some((target: unknown) => {
-      return typeof target === 'object' && target !== null &&
-          'webSocketDebuggerUrl' in target && target.webSocketDebuggerUrl === expectedURL;
+      return typeof target === 'object' && target !== null && 'webSocketDebuggerUrl' in target &&
+          target.webSocketDebuggerUrl === expectedURL;
     });
     if (!ownedTarget) {
       throw new Error('직접 실행한 프로세스의 디버거 연결을 찾을 수 없습니다.');

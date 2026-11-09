@@ -99,11 +99,13 @@ export class BrowserTestEnvironment {
     const fixtureSource = await readFile(path.join(__dirname, '../fixtures', fixture), 'utf8');
     const code = setup ? fixtureSource.replace('i * 2', 'i * globalThis.seed') : fixtureSource;
     const marker = path.join(this.#temporaryDirectory, '실행 횟수.txt');
-    const finished = "process.getBuiltinModule('fs').appendFileSync(process.argv[2], '뒷부분 실행\\n');";
+    const finished = 'process.getBuiltinModule(\'fs\').appendFileSync(process.argv[2], \'뒷부분 실행\\n\');';
     // 비동기 예제는 함수가 반환한 Promise까지 끝난 뒤 종료 표식을 남긴다.
     const nodeCode = fixture === 'async-await.js' ?
-        code.replace('asyncExample();', `asyncExample().then(() => { ${finished} });`) : `${code}\n${finished}`;
-    const source = kind === 'console' ? `debugger;\n${code}` :
+        code.replace('asyncExample();', `asyncExample().then(() => { ${finished} });`) :
+        `${code}\n${finished}`;
+    const source = kind === 'console' ?
+        `debugger;\n${code}` :
         `process.getBuiltinModule('fs').appendFileSync(process.argv[2], '진입\\n');\n${nodeCode}`;
     const entry = path.join(this.#temporaryDirectory, fixture);
     await writeFile(entry, source);
@@ -121,13 +123,17 @@ export class BrowserTestEnvironment {
     let initialTarget: {ws: string, pid: number, port: number};
     if (kind === 'node') {
       this.#target = new NodeTestTarget({
-        entry, args: [marker, '공백 있는 인자', ''], cwd: this.#temporaryDirectory,
+        entry,
+        args: [marker, '공백 있는 인자', ''],
+        cwd: this.#temporaryDirectory,
         env: {BACKDO_FIRST: '첫 번째', BACKDO_SECOND: '두 번째', BACKDO_RESTORE_CONTEXT: '사용자 값'},
       });
       initialTarget = await this.#target.start();
     } else {
       const response = await fetch(`${this.#application.origin}/ws/open`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({port: 0}),
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({port: 0}),
       });
       const opened = await response.json();
       assert.isTrue(response.ok, JSON.stringify(opened));
@@ -135,30 +141,44 @@ export class BrowserTestEnvironment {
     }
     this.#browser = await puppeteer.launch({
       executablePath: process.env.CHROME_BIN || defaultChromePath(),
-      headless: true, defaultViewport: {width: 1440, height: 1000},
+      headless: true,
+      defaultViewport: {width: 1440, height: 1000},
       args: ['--no-first-run', '--disable-features=Translate'],
     });
     const page = await this.#browser.newPage();
     const pageErrors: string[] = [];
     let documentRequests = 0;
-    page.on('request', request => { if (request.resourceType() === 'document') {documentRequests++;} });
+    page.on('request', request => {
+      if (request.resourceType() === 'document') {
+        documentRequests++;
+      }
+    });
     page.on('pageerror', error => pageErrors.push(error.message));
     const registered = new Promise<void>(resolve => {
       page.on('response', response => {
-        if (response.request().method() === 'POST' && response.url() === `${this.#application?.origin}/sessions` && response.ok()) {
-          void response.json().then(result => { this.#currentSessionId = result.id; resolve(); });
+        if (response.request().method() === 'POST' && response.url() === `${this.#application?.origin}/sessions` &&
+            response.ok()) {
+          void response.json().then(result => {
+            this.#currentSessionId = result.id;
+            resolve();
+          });
         }
       });
     });
     await page.setRequestInterception(true);
     page.on('request', request => {
       void (async () => {
-        if (request.method() === 'POST' && request.url().endsWith('/restart')) {await this.beforeRestart?.();}
-        if (request.method() === 'POST' && request.url().includes('/calibrations/')) {await this.beforeCalibration?.(page);}
+        if (request.method() === 'POST' && request.url().endsWith('/restart')) {
+          await this.beforeRestart?.();
+        }
+        if (request.method() === 'POST' && request.url().includes('/calibrations/')) {
+          await this.beforeCalibration?.(page);
+        }
         await request.continue();
       })().catch(async error => {
         await request.respond({
-          status: 400, contentType: 'application/json',
+          status: 400,
+          contentType: 'application/json',
           headers: {'Access-Control-Allow-Origin': this.#server?.origin ?? ''},
           body: JSON.stringify({error: error.message}),
         });
@@ -175,7 +195,9 @@ export class BrowserTestEnvironment {
     await page.goto(url.href, {waitUntil: 'domcontentloaded'});
     await page.addScriptTag({type: 'module', url: `${this.#server.origin}/models/replay/ReplayTestHarness.js`});
     await page.waitForFunction(() => window.backdoTest?.ready(), {timeout: UI_TIMEOUT_MS});
-    if (restart) {await registered;}
+    if (restart) {
+      await registered;
+    }
     if (kind === 'console') {
       if (setup) {
         await enterConsoleCode(page, setup.replace('BACKDO_ORIGIN', this.#server.origin));
@@ -188,8 +210,15 @@ export class BrowserTestEnvironment {
     } else {
       await page.waitForFunction(() => window.backdoTest.isPaused(), {timeout: UI_TIMEOUT_MS});
     }
-    return {page, source, entry, marker, initialTarget, documentRequests: () => documentRequests,
-      restartCount: () => this.target.restarts, pageErrors};
+    return {
+      page,
+      source,
+      entry,
+      marker,
+      initialTarget,
+      documentRequests: () => documentRequests,
+      restartCount: () => this.target.restarts,
+      pageErrors
+    };
   }
-
 }

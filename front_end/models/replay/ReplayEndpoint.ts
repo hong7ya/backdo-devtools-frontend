@@ -4,7 +4,9 @@
 
 export type TargetKind = 'node'|'console';
 
-export type ConnectionRequest = {ws: string}|{port: number};
+export type ConnectionRequest = {
+  ws: string
+}|{port: number};
 
 /** 기존 ws 주소를 우선한다. 포트만 전달한 경우 주소 조회는 서버 연결 계층에 맡긴다. */
 export function readConnectionRequest(url: URL): ConnectionRequest|null {

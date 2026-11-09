@@ -11,7 +11,13 @@ import * as Bindings from '../bindings/bindings.js';
 import {LocalTargetLifecycle} from './LocalTargetLifecycle.js';
 import {type CalibrationProcess, measureRoundTrip} from './ReplayCalibration.js';
 import {ReplayController} from './ReplayController.js';
-import {type ConnectionRequest, readConnectionRequest, replaceConnectionAddress, type TargetKind, validateWebSocketURL} from './ReplayEndpoint.js';
+import {
+  type ConnectionRequest,
+  readConnectionRequest,
+  replaceConnectionAddress,
+  type TargetKind,
+  validateWebSocketURL
+} from './ReplayEndpoint.js';
 
 export interface TargetAddress {
   ws: string;
@@ -47,8 +53,9 @@ export class ReplayConnection {
 
   constructor(controller = ReplayController.instance()) {
     this.#controller = controller;
-    controller.setScriptFilter(script => !Bindings.IgnoreListManager.IgnoreListManager.instance().isUserIgnoreListedURL(
-        script.sourceURL, {isContentScript: script.isContentScript()}));
+    controller.setScriptFilter(
+        script => !Bindings.IgnoreListManager.IgnoreListManager.instance().isUserIgnoreListedURL(
+            script.sourceURL, {isContentScript: script.isContentScript()}));
   }
 
   static instance(): ReplayConnection {
@@ -66,8 +73,7 @@ export class ReplayConnection {
       if (!address) {
         throw new Error('CDP 응답 시간을 측정할 연결 정보가 없습니다.');
       }
-      return await measureRoundTrip(
-          cancellation => createProcess(address.kind, cancellation), address.ws, signal);
+      return await measureRoundTrip(cancellation => createProcess(address.kind, cancellation), address.ws, signal);
     } : null);
   }
 
@@ -96,7 +102,8 @@ export class ReplayConnection {
             throw error;
           }
           // 서버가 꺼져 있어도 기존 ws의 일반 디버깅은 유지한다. 재시작과 측정은 활성화하지 않는다.
-          Common.Console.Console.instance().warn(`BackDo 로컬 서버: ${error instanceof Error ? error.message : String(error)}`);
+          Common.Console.Console.instance().warn(
+              `BackDo 로컬 서버: ${error instanceof Error ? error.message : String(error)}`);
           ws = request.ws;
         }
       }
@@ -116,9 +123,11 @@ export class ReplayConnection {
   async #connectTarget(ws: string, options: ConnectionOptions): Promise<void> {
     const address = validateWebSocketURL(ws);
     let notifyClosed: () => void = () => {};
-    this.#connectionClosed = new Promise(resolve => { notifyClosed = resolve; });
-    ProtocolClient.InspectorBackend.Connection.setFactory(() => new SDK.Connections.WebSocketConnection(
-        address as Platform.DevToolsPath.UrlString, message => {
+    this.#connectionClosed = new Promise(resolve => {
+      notifyClosed = resolve;
+    });
+    ProtocolClient.InspectorBackend.Connection.setFactory(
+        () => new SDK.Connections.WebSocketConnection(address as Platform.DevToolsPath.UrlString, message => {
           notifyClosed();
           if (this.#expectedDisconnect === address) {
             return;

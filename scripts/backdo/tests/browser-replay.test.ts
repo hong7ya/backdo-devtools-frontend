@@ -8,7 +8,11 @@ import * as path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import type {Page} from 'puppeteer-core';
 
-import {addBreakpointForLine, getLineNumberElement, removeBreakpointForLine} from '../../../test/e2e/helpers/sources-helpers.js';
+import {
+  addBreakpointForLine,
+  getLineNumberElement,
+  removeBreakpointForLine
+} from '../../../test/e2e/helpers/sources-helpers.js';
 
 import {enterConsoleCode} from './BrowserTestActions.js';
 import {BrowserTestEnvironment, type TestSession} from './BrowserTestEnvironment.js';
@@ -41,7 +45,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         }
       };
       const session = await environment.open({
-        kind, fixture: 'for.js',
+        kind,
+        fixture: 'for.js',
         setup: kind === 'console' ? 'globalThis.seed = 2; await fetch("BACKDO_ORIGIN/effect");' : undefined,
       });
       const snapshot = await session.page.evaluate(() => window.backdoTest.snapshot());
@@ -53,9 +58,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       assert.strictEqual(target.pid, session.initialTarget.pid);
       assert.strictEqual(target.ws, session.initialTarget.ws);
       assert.deepInclude(environment.calibrations, {calibrationsCreated: 1, calibrationsDisposed: 1, calibrations: 0});
-      assert.strictEqual(environment.effects, kind === 'console' ? 1 : 0, '측정 때문에 사용자 외부 요청이 반복되면 안 된다');
+      assert.strictEqual(
+          environment.effects, kind === 'console' ? 1 : 0, '측정 때문에 사용자 외부 요청이 반복되면 안 된다');
       if (kind === 'node') {
-        assert.strictEqual(await readFile(session.marker, 'utf8').catch(() => ''), '', '측정 중 사용자 코드는 실행하지 않는다');
+        assert.strictEqual(
+            await readFile(session.marker, 'utf8').catch(() => ''), '', '측정 중 사용자 코드는 실행하지 않는다');
       }
       await session.page.waitForFunction(() => window.backdoTest.snapshot().highlight !== null);
       const rendered = await session.page.evaluate(() => window.backdoTest.snapshot());
@@ -67,32 +74,35 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       assert.deepEqual(session.pageErrors, []);
     }).timeout(60_000);
 
-    it(`${kind === 'node' ? 'Node 포트 연결' : '기존 콘솔 입력'}에서 정지 중 변수 조회·수정 후에도 거꾸로갈 수 있다`, async () => {
-      const session = await environment.open({kind, fixture: 'for.js'});
-      const historyLength = await runToReturn(session);
-      assert.strictEqual(await evaluateInConsole(session.page, 'total'), '12');
-      assert.strictEqual(await evaluateInConsole(session.page, 'total += 1'), '13');
-      assert.strictEqual(await evaluateInConsole(session.page, 'total'), '13');
-      assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), historyLength);
+    it(`${kind === 'node' ? 'Node 포트 연결' : '기존 콘솔 입력'}에서 정지 중 변수 조회·수정 후에도 거꾸로갈 수 있다`,
+        async () => {
+          const session = await environment.open({kind, fixture: 'for.js'});
+          const historyLength = await runToReturn(session);
+          assert.strictEqual(await evaluateInConsole(session.page, 'total'), '12');
+          assert.strictEqual(await evaluateInConsole(session.page, 'total += 1'), '13');
+          assert.strictEqual(await evaluateInConsole(session.page, 'total'), '13');
+          assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), historyLength);
 
-      const sourcesTab = await session.page.waitForSelector('pierce/#tab-sources', {visible: true});
-      if (!sourcesTab) {
-        assert.fail('소스 탭을 찾을 수 없습니다.');
-      }
-      await sourcesTab.click();
-      assert.isFalse(await reverseDisabled(session.page));
-      await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '<'));
-      assert.strictEqual(await evaluateInConsole(session.page, 'total'), '12',
-          '재실행 결과를 보여 주고 콘솔에서 수동으로 바꾼 값은 다시 적용하지 않아야 한다');
-      await sourcesTab.click();
-      assert.isFalse(await reverseDisabled(session.page));
-      assert.deepEqual(session.pageErrors, []);
-    }).timeout(60_000);
+          const sourcesTab = await session.page.waitForSelector('pierce/#tab-sources', {visible: true});
+          if (!sourcesTab) {
+            assert.fail('소스 탭을 찾을 수 없습니다.');
+          }
+          await sourcesTab.click();
+          assert.isFalse(await reverseDisabled(session.page));
+          await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '<'));
+          assert.strictEqual(
+              await evaluateInConsole(session.page, 'total'), '12',
+              '재실행 결과를 보여 주고 콘솔에서 수동으로 바꾼 값은 다시 적용하지 않아야 한다');
+          await sourcesTab.click();
+          assert.isFalse(await reverseDisabled(session.page));
+          assert.deepEqual(session.pageErrors, []);
+        })
+        .timeout(60_000);
 
     for (const [fixture, description] of [
-      ['for.js', 'for 문의 마지막 조건식으로'],
-      ['async-await.js', 'async/await 이후의 마지막 조건식으로'],
-      ['for-of-break.js', 'for...of의 break 직전 위치로'],
+             ['for.js', 'for 문의 마지막 조건식으로'],
+             ['async-await.js', 'async/await 이후의 마지막 조건식으로'],
+             ['for-of-break.js', 'for...of의 break 직전 위치로'],
     ]) {
       if (kind === 'node' && fixture === 'for-of-break.js') {
         continue;
@@ -142,20 +152,25 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
 
       await resumeToHelper(lastPause);
       await clickExecutionButton(session.page, 'Resume script execution');
-      await session.page.waitForFunction(url => window.backdoTest.isPaused() &&
-          window.backdoTest.snapshot().position?.url.endsWith(url), {}, caller.url);
+      await session.page.waitForFunction(
+          url => window.backdoTest.isPaused() && window.backdoTest.snapshot().position?.url.endsWith(url), {},
+          caller.url);
       const returned = positionIn(helper, 'return total;');
       await reverseAndVerify(session.page, {
-        ...returned, columnNumber: lines[returned.lineNumber].length, url: 'modules-helper.mjs',
+        ...returned,
+        columnNumber: lines[returned.lineNumber].length,
+        url: 'modules-helper.mjs',
       });
       await reverseAndVerify(session.page, {...returned, url: 'modules-helper.mjs'});
       assert.deepEqual(session.pageErrors, []);
 
       async function resumeToHelper(line: number): Promise<void> {
         await clickExecutionButton(session.page, 'Resume script execution');
-        await session.page.waitForFunction(expected => window.backdoTest.snapshot().error ||
-            window.backdoTest.isPausedAtLine(expected) &&
-            window.backdoTest.snapshot().position?.url.endsWith('modules-helper.mjs'), {}, line);
+        await session.page.waitForFunction(
+            expected => window.backdoTest.snapshot().error ||
+                window.backdoTest.isPausedAtLine(expected) &&
+                    window.backdoTest.snapshot().position?.url.endsWith('modules-helper.mjs'),
+            {}, line);
         assert.isNull((await session.page.evaluate(() => window.backdoTest.snapshot())).error);
       }
     }).timeout(60_000);
@@ -173,7 +188,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isAbove(await session.page.evaluate(() => window.backdoTest.historyLength()), completedHistoryLength);
     await reverseAndVerify(session.page, {...positionIn(session.source, '}', '}'), url: 'backdo-console:///1'});
     await reverseAndVerify(session.page, {
-      url: 'https://example.test/completed-source.js', lineNumber: 1, columnNumber: 'Math.abs(-2);'.indexOf('abs'),
+      url: 'https://example.test/completed-source.js',
+      lineNumber: 1,
+      columnNumber: 'Math.abs(-2);'.indexOf('abs'),
     });
     assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
@@ -194,7 +211,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   }).timeout(60_000);
 
   it('UI에서 추가한 XHR/fetch 중단점을 기록용 정지로 넘기지 않는다', async () => {
-    const session = await environment.open({kind: 'console', fixture: 'fetch.js', setup: 'globalThis.endpoint = "BACKDO_ORIGIN/effect";'});
+    const session = await environment.open(
+        {kind: 'console', fixture: 'fetch.js', setup: 'globalThis.endpoint = "BACKDO_ORIGIN/effect";'});
     const section = await session.page.waitForSelector('pierce/[aria-label="XHR/fetch Breakpoints"][aria-expanded]');
     if (await section?.evaluate(element => element.getAttribute('aria-expanded')) !== 'true') {
       await section?.click();
@@ -210,8 +228,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     const returnLine = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
     await (await lineNumberElement(session.page, returnLine)).click();
     await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(line => window.backdoTest.pauseReason() === 'XHR' ||
-        window.backdoTest.isPausedAtLine(line), {}, returnLine);
+    await session.page.waitForFunction(
+        line => window.backdoTest.pauseReason() === 'XHR' || window.backdoTest.isPausedAtLine(line), {}, returnLine);
     assert.strictEqual(await session.page.evaluate(() => window.backdoTest.pauseReason()), 'XHR');
     assert.strictEqual(environment.effects, 0, '사용자가 재개하기 전에는 요청을 보내면 안 된다');
     await clickExecutionButton(session.page, 'Resume script execution');
@@ -224,7 +242,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   }).timeout(60_000);
 
   it('조건식과 로그포인트는 복원 중 실행하지 않고 복원 후 다음 실행에 다시 적용한다', async () => {
-    const session = await environment.open({kind: 'console', fixture: 'breakpoints.js', setup: 'globalThis.seed = 2; globalThis.endpoint = "BACKDO_ORIGIN/effect";'});
+    const session = await environment.open({
+      kind: 'console',
+      fixture: 'breakpoints.js',
+      setup: 'globalThis.seed = 2; globalThis.endpoint = "BACKDO_ORIGIN/effect";'
+    });
     const bodyLine = session.source.split('\n').findIndex(line => line.includes('const doubled'));
     await addConditionalBreakpoint(session.page, bodyLine, '(fetch(globalThis.endpoint), false)', false);
     await addConditionalBreakpoint(session.page, bodyLine + 1, 'fetch(globalThis.endpoint)', true);
@@ -240,8 +262,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
     const previousPauseCount = await session.page.evaluate(() => window.backdoTest.snapshot().visiblePauses.length);
     await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(({line, previousCount}) =>
-        window.backdoTest.snapshot().visiblePauses.length > previousCount && window.backdoTest.isPausedAtLine(line),
+    await session.page.waitForFunction(
+        ({line, previousCount}) =>
+            window.backdoTest.snapshot().visiblePauses.length > previousCount && window.backdoTest.isPausedAtLine(line),
         {}, {line: returnLine, previousCount: previousPauseCount});
     assert.strictEqual(environment.effects, 16, '복원 후에는 원래 조건식과 로그포인트가 다시 작동해야 한다');
     assert.deepEqual(session.pageErrors, []);
@@ -266,7 +289,9 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
 
   it('긴 복원에서도 로딩·패널 이동을 유지하고 CDP 비용에는 실제 실행 시간을 섞지 않는다', async () => {
     let releaseRestart: (() => void)|undefined;
-    const gate = new Promise<void>(resolve => { releaseRestart = resolve; });
+    const gate = new Promise<void>(resolve => {
+      releaseRestart = resolve;
+    });
     const session = await environment.open({kind: 'node', fixture: 'for.js'});
     const historyLength = await runToReturn(session);
     environment.beforeRestart = () => gate;
@@ -363,11 +388,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     return line;
   }
 
-  async function addConditionalBreakpoint(page: Page, lineNumber: number, condition: string, isLogpoint: boolean):
-      Promise<void> {
+  async function addConditionalBreakpoint(
+      page: Page, lineNumber: number, condition: string, isLogpoint: boolean): Promise<void> {
     await (await lineNumberElement(page, lineNumber)).click({button: 'right'});
-    const action = await page.waitForSelector(isLogpoint ? 'aria/Add logpoint…' : 'aria/Add conditional breakpoint…',
-        {visible: true});
+    const action = await page.waitForSelector(
+        isLogpoint ? 'aria/Add logpoint…' : 'aria/Add conditional breakpoint…', {visible: true});
     assert.exists(action);
     await action.click();
     const dialog = await page.waitForSelector('pierce/.sources-edit-breakpoint-dialog', {visible: true});
@@ -377,8 +402,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     await editor.focus();
     await page.keyboard.type(condition);
     await page.keyboard.press('Enter');
-    await page.waitForSelector(isLogpoint ? 'pierce/.cm-breakpoint-logpoint' : 'pierce/.cm-breakpoint-conditional',
-        {visible: true});
+    await page.waitForSelector(
+        isLogpoint ? 'pierce/.cm-breakpoint-logpoint' : 'pierce/.cm-breakpoint-conditional', {visible: true});
   }
 
   async function clickExecutionButton(page: Page, label: string): Promise<void> {
@@ -397,9 +422,11 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
       assert.fail('실행 재개 버튼을 찾을 수 없습니다.');
     }
     await resume.click();
-    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {
-      timeout: UI_TIMEOUT_MS,
-    }, lineNumber);
+    await session.page.waitForFunction(
+        line => window.backdoTest.isPausedAtLine(line), {
+          timeout: UI_TIMEOUT_MS,
+        },
+        lineNumber);
     return await session.page.evaluate(() => window.backdoTest.historyLength());
   }
 
@@ -440,7 +467,8 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
         (initialState.estimatedReplayMs ?? 0) * (historyLength - 1) / historyLength, 0.000001,
         '버린 미래 기록만큼 예상 CDP 비용도 줄어야 한다');
     assert.exists(result.position);
-    assert.deepEqual([result.position.lineNumber, result.position.columnNumber], [expected.lineNumber, expected.columnNumber]);
+    assert.deepEqual(
+        [result.position.lineNumber, result.position.columnNumber], [expected.lineNumber, expected.columnNumber]);
     assert.deepEqual(result.highlight, [expected.lineNumber, expected.columnNumber]);
     if (expected.url) {
       assert.isTrue(result.position.url.endsWith(expected.url), `복원된 소스: ${result.position.url}`);
@@ -479,8 +507,10 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   }
 
   async function waitForReplay(page: Page, previousLength: number): Promise<void> {
-    await page.waitForFunction(length => window.backdoTest.replayFinished(length), {
-      timeout: REPLAY_TIMEOUT_MS,
-    }, previousLength);
+    await page.waitForFunction(
+        length => window.backdoTest.replayFinished(length), {
+          timeout: REPLAY_TIMEOUT_MS,
+        },
+        previousLength);
   }
 });

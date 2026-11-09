@@ -48,7 +48,8 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
     this.element.classList.toggle('backdo-replay-disabled', !this.button.enabled);
     this.#status = status;
     if (busy || calibrating) {
-      this.#status = calibrating ? '사용자 코드와 분리된 프로그램에서 CDP 요청·응답 시간을 확인하고 있습니다.' : '이전 실행 위치로 복원 중입니다.';
+      this.#status = calibrating ? '사용자 코드와 분리된 프로그램에서 CDP 요청·응답 시간을 확인하고 있습니다.' :
+                                   '이전 실행 위치로 복원 중입니다.';
     }
     this.#loadingLabel.textContent = calibrating ? 'CDP 응답 확인 중' : '복원 중';
     this.#updateTooltip();
@@ -58,9 +59,11 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
   updateUsage(error: string|null, estimatedReplayMs: number|null): void {
     const ratio = (estimatedReplayMs ?? 0) / REPLAY_RESPONSE_BUDGET_MS;
     const percent = Math.min(100, ratio * 100);
-    const timeDescription = estimatedReplayMs === null ? 'CDP 응답 시간 측정 준비 중' :
+    const timeDescription = estimatedReplayMs === null ?
+        'CDP 응답 시간 측정 준비 중' :
         `예상 CDP 처리 약 ${(estimatedReplayMs / 1000).toFixed(1)}초 / 기준 3초 미만 (재시작·코드 실행·화면 표시 제외)`;
-    const title = error ? `기록 종료 · 저장된 기록 해제\n${error}` : `CDP 처리 시간 예산 ${percent.toFixed(1)}% 사용\n${timeDescription}`;
+    const title = error ? `기록 종료 · 저장된 기록 해제\n${error}` :
+                          `CDP 처리 시간 예산 ${percent.toFixed(1)}% 사용\n${timeDescription}`;
     this.#meter.setAttribute('aria-valuenow', String(percent));
     this.#meter.setAttribute('aria-valuetext', error ? '기록 종료 · 저장된 기록 해제' : title);
     this.#fill.style.width = `${percent}%`;

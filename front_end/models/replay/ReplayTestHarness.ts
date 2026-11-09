@@ -30,7 +30,8 @@ class ReplayTestHarness implements BrowserTestClient {
   }
 
   calibrationFinished(): boolean {
-    return !this.#controller.calibrating && !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
+    return !this.#controller.calibrating && !this.#controller.busy &&
+        !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
         (this.#controller.calibrated || Boolean(this.#controller.session.error));
   }
 
@@ -53,7 +54,8 @@ class ReplayTestHarness implements BrowserTestClient {
   replayFinished(previousLength: number): boolean {
     const reachedTarget = this.#controller.session.history.length === previousLength - 1;
     const failed = Boolean(this.#controller.session.error);
-    return !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert && (reachedTarget || failed);
+    return !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
+        (reachedTarget || failed);
   }
 
   snapshot(): ReplaySnapshot {
@@ -64,8 +66,10 @@ class ReplayTestHarness implements BrowserTestClient {
       estimatedReplayMs: this.#controller.estimatedReplayMs,
       position,
       highlight: this.#highlightedPosition(),
-      messages: Common.Console.Console.instance().messages().map(message => message.text).filter(
-          text => text.startsWith('BackDo:')),
+      messages: Common.Console.Console.instance()
+                    .messages()
+                    .map(message => message.text)
+                    .filter(text => text.startsWith('BackDo:')),
       sameDocument: this.#originalDocument === document,
       sameTimeOrigin: this.#originalTimeOrigin === performance.timeOrigin,
       sameHistoryLength: this.#originalHistoryLength === history.length,
@@ -77,7 +81,8 @@ class ReplayTestHarness implements BrowserTestClient {
   }
 
   #debuggerModel(): SDK.DebuggerModel.DebuggerModel|null {
-    return SDK.TargetManager.TargetManager.instance().primaryPageTarget()?.model(SDK.DebuggerModel.DebuggerModel) ?? null;
+    return SDK.TargetManager.TargetManager.instance().primaryPageTarget()?.model(SDK.DebuggerModel.DebuggerModel) ??
+        null;
   }
 
   #highlightedPosition(): number[]|null {
@@ -108,8 +113,7 @@ class ReplayTestHarness implements BrowserTestClient {
     const start = document.startViewTransition.bind(document);
     document.startViewTransition = (...args: Parameters<Document['startViewTransition']>) => {
       const transition = start(...args);
-      void transition.ready.then(
-          () => this.#transitions.push('ready'), () => this.#transitions.push('skipped'));
+      void transition.ready.then(() => this.#transitions.push('ready'), () => this.#transitions.push('skipped'));
       return transition;
     };
   }

@@ -179,7 +179,9 @@ export class ConsoleModel extends SDKModel<EventTypes> {
       useCommandLineAPI: boolean): Promise<void> {
     // 실행이 debugger 문에서 멈추기 전에 콘솔 입력을 기록할 수 있게 알린다.
     this.dispatchEventToListeners(Events.CommandWillBeEvaluated, {
-      executionContext, expression, useCommandLineAPI,
+      executionContext,
+      expression,
+      useCommandLineAPI,
       userGesture: Common.Settings.Settings.instance().moduleSetting('console-user-activation-eval').get(),
     });
     const result = await executionContext.evaluate(

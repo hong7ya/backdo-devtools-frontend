@@ -70,7 +70,8 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     this.targetManager = targetManager;
     this.debuggerWorkspaceBinding = debuggerWorkspaceBinding;
     SDK.UserBreakpoints.UserBreakpoints.instance().register('line-breakpoints', async () => {
-      await SDK.UserBreakpoints.finishUpdates([...this.#breakpointByStorageId.values()].map(breakpoint => breakpoint.updateBreakpoint()));
+      await SDK.UserBreakpoints.finishUpdates(
+          [...this.#breakpointByStorageId.values()].map(breakpoint => breakpoint.updateBreakpoint()));
     });
 
     this.storage.mute();
@@ -1160,8 +1161,8 @@ export class ModelBreakpoint {
       return;
     }
     this.resetLocations();
-    await SDK.UserBreakpoints.finishUpdates(this.#breakpointIds.map(id =>
-      SDK.UserBreakpoints.apply(this.#debuggerModel.agent.invoke_removeBreakpoint({breakpointId: id}))));
+    await SDK.UserBreakpoints.finishUpdates(this.#breakpointIds.map(
+        id => SDK.UserBreakpoints.apply(this.#debuggerModel.agent.invoke_removeBreakpoint({breakpointId: id}))));
     this.didRemoveFromDebugger();
     this.#currentState = null;
   }

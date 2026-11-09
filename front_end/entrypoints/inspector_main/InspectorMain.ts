@@ -120,7 +120,6 @@ export class InspectorMainImpl implements Common.Runnable.Runnable {
           void target.runtimeAgent().invoke_runIfWaitingForDebugger();
         }
       }, Components.TargetDetachedDialog.TargetDetachedDialog.connectionLost);
-
     }
 
     new SourcesPanelIndicator();

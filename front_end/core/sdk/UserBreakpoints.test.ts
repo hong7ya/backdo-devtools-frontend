@@ -111,8 +111,12 @@ describeWithMockConnection('사용자 중단점의 일시 해제와 복구', () 
   it('일부 종류의 적용이 실패해도 나머지 복구를 모두 기다리고 실패를 알린다', async () => {
     const activation = SDK.UserBreakpoints.UserBreakpoints.instance();
     const states: boolean[] = [];
-    activation.register('failed', async () => { throw new Error('CDP 실패'); });
-    activation.register('working', async () => { states.push(activation.suspended); });
+    activation.register('failed', async () => {
+      throw new Error('CDP 실패');
+    });
+    activation.register('working', async () => {
+      states.push(activation.suspended);
+    });
     const failure = await activation.setSuspended(true).then(() => null, error => error);
     assert.instanceOf(failure, AggregateError);
     const restoreFailure = await activation.setSuspended(false).then(() => null, error => error);

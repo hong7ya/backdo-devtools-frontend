@@ -7,7 +7,9 @@ import * as Replay from './replay.js';
 describe('재실행 세션', () => {
   const {ReplaySession} = Replay.ReplaySession;
   const pause = (lineNumber: number, depth = 1, userVisible = false) => ({
-    position: {url: 'file:///entry.js', hash: 'v1', lineNumber, columnNumber: 0}, depth, userVisible,
+    position: {url: 'file:///entry.js', hash: 'v1', lineNumber, columnNumber: 0},
+    depth,
+    userVisible,
   });
 
   it('Resume 중간 위치를 기록하고 복원할 때 최종 정지만 화면에 전달한다', () => {

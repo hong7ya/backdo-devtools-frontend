@@ -12,4 +12,14 @@ import * as ReplayLimits from './ReplayLimits.js';
 import * as ReplaySession from './ReplaySession.js';
 import * as ReplayTiming from './ReplayTiming.js';
 
-export {ExecutionHistory, LocalTargetLifecycle, ReplayCalibration, ReplayConnection, ReplayController, ReplayEndpoint, ReplayLimits, ReplaySession, ReplayTiming};
+export {
+  ExecutionHistory,
+  LocalTargetLifecycle,
+  ReplayCalibration,
+  ReplayConnection,
+  ReplayController,
+  ReplayEndpoint,
+  ReplayLimits,
+  ReplaySession,
+  ReplayTiming
+};

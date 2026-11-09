@@ -127,8 +127,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   canReverse(model: SDK.DebuggerModel.DebuggerModel|null): boolean {
-    return Boolean(this.#restartTarget) && model === this.#debuggerModel && Boolean(model?.isPaused()) &&
-        !this.busy && this.calibrated && this.session.canReverse;
+    return Boolean(this.#restartTarget) && model === this.#debuggerModel && Boolean(model?.isPaused()) && !this.busy &&
+        this.calibrated && this.session.canReverse;
   }
 
   get status(): string {
@@ -153,7 +153,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.#debuggerModel?.isPaused() && this.session.history.length && !this.session.atRecordedPause) {
       return '현재 정지 위치는 실행 기록 대상이 아닙니다. Ignore List 설정을 확인해 주세요.';
     }
-    return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' : '기록된 이전 실행 위치가 없습니다.';
+    return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' :
+                                     '기록된 이전 실행 위치가 없습니다.';
   }
 
   configure(connect: (ws: string) => Promise<void>): void {
@@ -204,8 +205,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   async #calibrateIfNeeded(): Promise<void> {
     const measure = this.#calibrationHandler;
-    if (!measure || this.calibrating || this.calibrated || this.session.error ||
-        !this.#debuggerModel?.isPaused() || !this.session.history.length) {
+    if (!measure || this.calibrating || this.calibrated || this.session.error || !this.#debuggerModel?.isPaused() ||
+        !this.session.history.length) {
       return;
     }
     const abort = new AbortController();
@@ -318,7 +319,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       void this.#calibrateIfNeeded();
       this.#notifyStatusChanged();
     }));
-    this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#notifyStatusChanged()));
+    this.#listeners.push(
+        model.addEventListener(SDK.DebuggerModel.Events.DebuggerResumed, () => this.#notifyStatusChanged()));
     const consoleModel = model.target().model(SDK.ConsoleModel.ConsoleModel);
     if (consoleModel) {
       this.#listeners.push(consoleModel.addEventListener(SDK.ConsoleModel.Events.CommandWillBeEvaluated, event => {
@@ -359,8 +361,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     // VM 번호와 scriptId는 재연결마다 달라진다. 원문이 일치하는 입력 순번으로 비교한다.
     const source = script.debuggerModel.agent.invoke_getScriptSource({scriptId: script.scriptId})
-                       .then(result => !result.getError() && result.scriptSource === input.expression ?
-                                 `backdo-console:///${index + 1}` : null, () => null);
+                       .then(
+                           result => !result.getError() && result.scriptSource === input.expression ?
+                               `backdo-console:///${index + 1}` :
+                               null,
+                           () => null);
     this.#consoleSources.set(script.scriptId, source);
     void source.then(url => {
       if (!url && this.#consoleSources.get(script.scriptId) === source) {
@@ -527,7 +532,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (!actualKey) {
         // 앞선 후보가 이 위치로 보정되었다면 이미 설치한 중단점을 사용한다.
         actualKey = positions.has(requestedKey) ? requestedKey :
-                                                await this.#installRecordingBreakpoint(script, location, positions);
+                                                  await this.#installRecordingBreakpoint(script, location, positions);
         resolvedPositions.set(requestedKey, actualKey);
       }
       if (location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement) {
@@ -619,8 +624,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       // 기록용 ID만 있는 일반 정지만 숨긴다. XHR·DOM·이벤트·예외·수동 정지는 보존한다.
       const onlyRecordingBreakpoint = details.reason === Protocol.Debugger.PausedEventReason.Other &&
-          details.breakpointIds.length > 0 &&
-          details.breakpointIds.every(id => this.#recordingBreakpointIds.has(id));
+          details.breakpointIds.length > 0 && details.breakpointIds.every(id => this.#recordingBreakpointIds.has(id));
       const disposition = this.session.recordPause({
         position,
         depth: details.callFrames.length,
@@ -701,7 +705,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.#scriptExecutionBreakpoint = null;
     }
     for (const breakpointId of this.#recordingBreakpointIds) {
-      void this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
+      void this.#debuggerModel?.agent.invoke_removeBreakpoint(
+          {breakpointId: breakpointId as Protocol.Debugger.BreakpointId});
     }
     this.#recordingBreakpointIds.clear();
     this.#notifyProgress();

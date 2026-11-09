@@ -67,8 +67,9 @@ class EventListenerBreakpoint extends CategorizedBreakpoint {
 
   async updateOnModel(model: EventBreakpointsModel): Promise<void> {
     const enabled = this.enabled() && !UserBreakpoints.instance().suspended;
-    await apply(enabled ? model.agent.invoke_setInstrumentationBreakpoint({eventName: this.name}) :
-                          model.agent.invoke_removeInstrumentationBreakpoint({eventName: this.name}));
+    await apply(
+        enabled ? model.agent.invoke_setInstrumentationBreakpoint({eventName: this.name}) :
+                  model.agent.invoke_removeInstrumentationBreakpoint({eventName: this.name}));
   }
 
   static readonly instrumentationPrefix = 'instrumentation:';
@@ -133,9 +134,12 @@ export class EventBreakpointsManager implements SDKModelObserver<EventBreakpoint
     ]);
 
     UserBreakpoints.instance().register('instrumentation-breakpoints', async () => {
-      await finishUpdates(TargetManager.instance().models(EventBreakpointsModel).flatMap(model =>
-        this.#eventListenerBreakpointsInternal.filter(breakpoint => breakpoint.enabled())
-            .map(breakpoint => breakpoint.updateOnModel(model))));
+      await finishUpdates(
+          TargetManager.instance()
+              .models(EventBreakpointsModel)
+              .flatMap(
+                  model => this.#eventListenerBreakpointsInternal.filter(breakpoint => breakpoint.enabled())
+                               .map(breakpoint => breakpoint.updateOnModel(model))));
     });
     TargetManager.instance().observeModels(EventBreakpointsModel, this);
   }

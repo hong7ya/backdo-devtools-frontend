@@ -330,10 +330,9 @@ export class SourcesPanel extends UI.Panel.Panel implements
         Extensions.ExtensionServer.Events.SidebarPaneAdded, this.extensionSidebarPaneAdded, this);
     SDK.TargetManager.TargetManager.instance().observeTargets(this);
     this.lastModificationTime = -Infinity;
-    Replay.ReplayController.ReplayController.instance().addEventListener(
-        Replay.ReplayController.Events.CHANGED, () => {
-          void this.updateDebuggerButtonsAndStatus();
-        });
+    Replay.ReplayController.ReplayController.instance().addEventListener(Replay.ReplayController.Events.CHANGED, () => {
+      void this.updateDebuggerButtonsAndStatus();
+    });
     Replay.ReplayController.ReplayController.instance().addEventListener(
         Replay.ReplayController.Events.RECORDING_CHANGED, () => this.updateReplayUsage());
   }
@@ -735,7 +734,9 @@ export class SourcesPanel extends UI.Panel.Panel implements
     const replay = Replay.ReplayController.ReplayController.instance();
     const busy = replay.busy || Boolean(this.#reverseTransition);
     this.#replayToolbar?.updateState({
-      busy, enabled: replay.canReverse(currentDebuggerModel), status: replay.status,
+      busy,
+      enabled: replay.canReverse(currentDebuggerModel),
+      status: replay.status,
       calibrating: replay.calibrating,
     });
     this.updateReplayUsage();
@@ -931,9 +932,11 @@ export class SourcesPanel extends UI.Panel.Panel implements
       }
       const frame = this.sourcesViewInternal.currentSourceFrame();
       const marker = frame?.textEditor.shadowRoot?.querySelector('.cm-executionLine');
-      const offset = frame ? TextEditor.ExecutionPositionHighlighter.getHighlightedPosition(frame.textEditor.state) : null;
+      const offset =
+          frame ? TextEditor.ExecutionPositionHighlighter.getHighlightedPosition(frame.textEditor.state) : null;
       // 반환 직후처럼 토큰이 없는 줄 끝도 에디터가 강조한 실제 위치로 확인한다.
-      if (frame && marker && offset !== null && this.sourcesViewInternal.currentUISourceCode() === location.uiSourceCode) {
+      if (frame && marker && offset !== null &&
+          this.sourcesViewInternal.currentUISourceCode() === location.uiSourceCode) {
         const editor = frame.textEditor.editor;
         const line = editor.state.doc.lineAt(offset);
         if (line.number - 1 === location.lineNumber && offset - line.from === (location.columnNumber ?? 0)) {

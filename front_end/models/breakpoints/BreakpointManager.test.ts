@@ -134,20 +134,21 @@ describeWithMockConnection('BreakpointManager', () => {
     const script = await backend.addScript(target, scriptDescription, null);
     const source = await uiSourceCodeFromScript(model, script);
     assert.exists(source);
-    const conditional = await breakpointManager.setBreakpoint(source, 0, 0,
-        'count > 1' as Breakpoints.BreakpointManager.UserCondition, true, false,
+    const conditional = await breakpointManager.setBreakpoint(
+        source, 0, 0, 'count > 1' as Breakpoints.BreakpointManager.UserCondition, true, false,
         Breakpoints.BreakpointManager.BreakpointOrigin.USER_ACTION);
-    const logpoint = await breakpointManager.setBreakpoint(source, 1, 0,
-        'count' as Breakpoints.BreakpointManager.UserCondition, true, true,
+    const logpoint = await breakpointManager.setBreakpoint(
+        source, 1, 0, 'count' as Breakpoints.BreakpointManager.UserCondition, true, true,
         Breakpoints.BreakpointManager.BreakpointOrigin.USER_ACTION);
-    const disabled = await breakpointManager.setBreakpoint(source, 2, 0,
-        Breakpoints.BreakpointManager.EMPTY_BREAKPOINT_CONDITION, false, false,
+    const disabled = await breakpointManager.setBreakpoint(
+        source, 2, 0, Breakpoints.BreakpointManager.EMPTY_BREAKPOINT_CONDITION, false, false,
         Breakpoints.BreakpointManager.BreakpointOrigin.USER_ACTION);
     assert.exists(conditional);
     assert.exists(logpoint);
     assert.exists(disabled);
-    const savedSettings = () => [...breakpointManager.storage.breakpoints.values()].map(
-        ({resolvedState: _resolvedState, ...settings}) => settings).sort((a, b) => a.lineNumber - b.lineNumber);
+    const savedSettings = () => [...breakpointManager.storage.breakpoints.values()]
+                                    .map(({resolvedState: _resolvedState, ...settings}) => settings)
+                                    .sort((a, b) => a.lineNumber - b.lineNumber);
     const saved = savedSettings();
     const activation = SDK.UserBreakpoints.UserBreakpoints.instance();
     set.resetHistory();

@@ -52,7 +52,9 @@ export async function measureRoundTrip(
     await connection.request('Runtime.enable');
     await connection.request('Debugger.enable');
     const script = await connection.request<Protocol.Runtime.CompileScriptResponse>('Runtime.compileScript', {
-      expression: DUMMY_SOURCE, sourceURL: 'backdo-calibration:///probe.js', persistScript: true,
+      expression: DUMMY_SOURCE,
+      sourceURL: 'backdo-calibration:///probe.js',
+      persistScript: true,
     });
     if (!script.scriptId || script.exceptionDetails) {
       throw new Error('더미 측정 소스를 준비하지 못했습니다.');
@@ -77,7 +79,8 @@ function assertSeparateEndpoint(dummyWS: string, userWS: string): void {
   const dummy = new URL(validateWebSocketURL(dummyWS));
   const user = new URL(validateWebSocketURL(userWS));
   const port = (url: URL): string => url.port || (url.protocol === 'wss:' ? '443' : '80');
-  const host = (url: URL): string => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ? 'loopback' : url.hostname;
+  const host =
+      (url: URL): string => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ? 'loopback' : url.hostname;
   if (host(dummy) === host(user) && port(dummy) === port(user)) {
     // 잘못 전달된 사용자 주소에는 연결하지 않고, 사용자 프로세스를 종료할 수도 있는 콜백도 호출하지 않는다.
     throw new Error('측정용 프로세스는 사용자 대상과 별도 포트를 사용해야 합니다.');

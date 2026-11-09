@@ -4,22 +4,11 @@
 
 import {assert} from 'chai';
 
-import {
-  click,
-  getBrowserAndPages,
-  goToResource,
-  step,
-  waitFor,
-  waitForFunction
-} from '../../shared/helper.js';
-import {
-  executionLineHighlighted,
-  PAUSE_INDICATOR_SELECTOR,
-  STEP_INTO_BUTTON
-} from '../helpers/sources-helpers.js';
+import {click, getBrowserAndPages, goToResource, step, waitFor, waitForFunction} from '../../shared/helper.js';
+import {executionLineHighlighted, PAUSE_INDICATOR_SELECTOR, STEP_INTO_BUTTON} from '../helpers/sources-helpers.js';
 
 const BEFORE_LINE_CODE = '    if (!isSunnyDay) {';
-const AFTER_LINE_CODE = "      const h = \'　　　　　🍇\';";
+const AFTER_LINE_CODE = '      const h = \'　　　　　🍇\';';
 const GO_TO_PREV_LINE_BUTTON = '[aria-label="goToPrevLine"]';
 
 describe('Sources Tab', () => {

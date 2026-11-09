@@ -59,7 +59,9 @@ export class LocalTargetLifecycle implements TargetLifecycle {
 
   async createCalibrationProcess(_kind: TargetKind, signal: AbortSignal): Promise<CalibrationProcess> {
     const path = `${this.#path()}/calibrations/${crypto.randomUUID()}`;
-    const dispose = async(): Promise<void> => { await this.#request(path, 'DELETE'); };
+    const dispose = async(): Promise<void> => {
+      await this.#request(path, 'DELETE');
+    };
     try {
       const result = await this.#request<{ws: string}>(path, 'POST', {}, signal);
       if (signal.aborted) {
@@ -84,7 +86,8 @@ export class LocalTargetLifecycle implements TargetLifecycle {
   async #request<T>(path: string, method: string, body?: object, signal?: AbortSignal): Promise<T> {
     const timeout = AbortSignal.timeout(30_000);
     const response = await fetch(`${this.#origin}${path}`, {
-      method, headers: body ? {'Content-Type': 'application/json'} : undefined,
+      method,
+      headers: body ? {'Content-Type': 'application/json'} : undefined,
       body: body ? JSON.stringify(body) : undefined,
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });

@@ -40,7 +40,6 @@ copy_to_gen("sources") {
     "filesystem/special-characters.html",
     "filesystem/with space.js",
     "filesystem/with%20space.js",
-    "go-to-prev-line-about-if.html",
     "infinity-loop.html",
     "inline-css.html",
     "inline-scripts.html",

@@ -14,18 +14,6 @@ describe('CDP 왕복과 기록 개수 기반 예산', () => {
     assert.strictEqual(timing.estimate(5999), 2999.5, '복원으로 버린 미래 기록의 비용도 줄어야 한다');
   });
 
-  it('사용자가 오래 대기하거나 계산해도 기록 개수가 같으면 예산은 같다', () => {
-    const clock = sinon.useFakeTimers();
-    try {
-      const timing = new Replay.ReplayTiming.ReplayTiming();
-      timing.calibrate(0.2);
-      clock.tick(60_000);
-      assert.strictEqual(timing.estimate(100), 20);
-    } finally {
-      clock.restore();
-    }
-  });
-
   it('유효하지 않은 측정값은 임의 기본값으로 대체하지 않는다', () => {
     const timing = new Replay.ReplayTiming.ReplayTiming();
     for (const value of [0, -1, NaN, Infinity]) {

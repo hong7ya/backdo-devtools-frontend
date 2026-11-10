@@ -2,14 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-function breakpointExample() {
+// eslint-disable-next-line no-debugger -- Console 입력의 시작 정지를 명시한다.
+debugger;
+
+function breakpointExample(multiplier) {
   let total = 0;
   for (let i = 0; i < 4; i += 1) {
-    const doubled = i * 2;
+    const doubled = i * multiplier;
     total += doubled;
   }
   return total;
 }
-breakpointExample();
+breakpointExample(2);
 
-breakpointExample();
+breakpointExample(3);

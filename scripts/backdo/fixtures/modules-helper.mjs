@@ -3,12 +3,12 @@
 // found in the LICENSE file.
 
 export function forExample() {
-  debugger;
+  debugger;  // 모듈 진입
   let total = 0;
   for (let i = 0; i < 4; i += 1) {
     const doubled = i * 2;
     total += doubled;
   }
-  debugger;
+  debugger;  // 반환 직전
   return total;
 }

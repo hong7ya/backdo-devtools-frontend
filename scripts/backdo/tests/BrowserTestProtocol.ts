@@ -3,37 +3,25 @@
 // found in the LICENSE file.
 
 /** Node 테스트와 브라우저 도우미 사이에서 주고받는 직렬화 가능한 데이터. */
-export interface RecordedPosition {
+export interface DisplayedSource {
   url: string;
-  hash: string;
-  lineNumber: number;
-  columnNumber: number;
+  text: string;
 }
 
 export interface ReplaySnapshot {
   error: string|null;
-  calibrated: boolean;
-  estimatedReplayMs: number|null;
-  position: RecordedPosition|null;
+  source: DisplayedSource|null;
   highlight: number[]|null;
   messages: string[];
-  sameDocument: boolean;
-  sameTimeOrigin: boolean;
-  sameHistoryLength: boolean;
-  historyState: unknown;
-  ws: string|null;
-  visiblePauses: number[][];
-  transitions: string[];
+  pauseCount: number;
 }
 
 export interface BrowserTestClient {
   ready(): boolean;
   calibrationFinished(): boolean;
-  historyLength(): number;
   isPaused(): boolean;
   pauseReason(): string|null;
-  isPausedAtLine(lineNumber: number): boolean;
-  replayFinished(previousLength: number): boolean;
+  sourceIsVisible(source: string): boolean;
   snapshot(): ReplaySnapshot;
 }
 

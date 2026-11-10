@@ -36,29 +36,55 @@ describe('실행 위치 기록', () => {
     assert.deepEqual(history.previous().target, at(4, 6));
   });
 
-  it('목표까지의 전체 위치 순서와 소스 버전이 일치해야 복원을 확정한다', () => {
+  it('기록한 소스 버전과 다르면 같은 위치도 복원 경로로 받아들이지 않는다', () => {
     const history = new ExecutionHistory();
     [at(0, 0), at(2, 20), at(6, 2)].forEach(p => history.record(p));
-    assert.throws(() => history.previous().accept(at(0, 0, 'edited-source')), /diverged/);
+    const plan = history.previous();
+
+    assert.throws(() => plan.accept(at(0, 0, 'edited-source')), /diverged/);
+  });
+
+  it('같은 소스라도 다음 실행 위치가 기록과 다르면 복원 경로를 거절한다', () => {
+    const history = new ExecutionHistory();
+    [at(0, 0), at(2, 20), at(6, 2)].forEach(p => history.record(p));
     const plan = history.previous();
     plan.accept(at(0, 0));
+
     assert.throws(() => plan.accept(at(2, 27)), /diverged/);
+  });
+
+  it('목표까지 도달하지 않은 복원의 확정을 거절하고 원래 기록을 유지한다', () => {
+    const history = new ExecutionHistory();
+    [at(0, 0), at(2, 20), at(6, 2)].forEach(p => history.record(p));
+    const plan = history.previous();
+    plan.accept(at(0, 0));
+
     assert.throws(() => history.commit(plan), /incomplete/);
     assert.lengthOf(history, 3);
   });
 
-  it('복원 후에는 새로운 이력을 기록하고 입력 객체의 외부 변경을 차단한다', () => {
+  it('입력 객체를 외부에서 변경해도 이미 기록한 위치는 바뀌지 않는다', () => {
     const history = new ExecutionHistory();
     const position = at(0, 0);
     history.record(position);
-    position.lineNumber = 99;
     history.record(at(1, 0));
+
+    position.lineNumber = 99;
+
+    assert.deepEqual(history.previous().target, at(0, 0));
+  });
+
+  it('복원 후 새 위치를 기록하면 버린 미래 대신 복원한 위치가 직전 방문이 된다', () => {
+    const history = new ExecutionHistory();
+    [at(0, 0), at(1, 0), at(2, 0)].forEach(position => history.record(position));
     const plan = history.previous();
-    assert.isTrue(plan.accept(at(0, 0)));
+    plan.accept(at(0, 0));
+    plan.accept(at(1, 0));
+
     history.commit(plan);
     history.record(at(9, 0));
-    assert.lengthOf(history, 2);
-    assert.deepEqual(history.previous().target, at(0, 0));
+
+    assert.deepEqual(history.previous().positions, [at(0, 0), at(1, 0)]);
   });
 
   it('빈 기록과 유효하지 않은 위치를 거부한다', () => {
@@ -71,6 +97,7 @@ describe('실행 위치 기록', () => {
 
   it('방문 횟수의 고정 상한 없이 이전 위치를 유지한다', () => {
     const history = new ExecutionHistory();
+    // 과거 100,000회 상한을 한 번 넘어도 시간 예산과 무관한 개수 제한을 두지 않는다.
     for (let index = 0; index <= 100_000; index++) {
       history.record(at(index, 0));
     }

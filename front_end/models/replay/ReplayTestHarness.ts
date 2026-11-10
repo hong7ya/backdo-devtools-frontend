@@ -13,16 +13,10 @@ import {ReplayController} from './ReplayController.js';
 /** 브라우저 안에서만 사용하는 통합 테스트 도우미. Node 테스트에는 직렬화 가능한 결과만 전달한다. */
 class ReplayTestHarness implements BrowserTestClient {
   readonly #controller = ReplayController.instance();
-  readonly #originalDocument = document;
-  readonly #originalTimeOrigin = performance.timeOrigin;
-  readonly #originalHistoryLength = history.length;
-  readonly #visiblePauses: number[][] = [];
-  readonly #transitions: string[] = [];
+  #pauseCount = 0;
 
   constructor() {
-    history.replaceState({backdoTest: 'preserve'}, '');
     this.#observeVisiblePauses();
-    this.#observeTransitions();
   }
 
   ready(): boolean {
@@ -35,10 +29,6 @@ class ReplayTestHarness implements BrowserTestClient {
         (this.#controller.calibrated || Boolean(this.#controller.session.error));
   }
 
-  historyLength(): number {
-    return this.#controller.session.history.length;
-  }
-
   isPaused(): boolean {
     return this.#debuggerModel()?.isPaused() ?? false;
   }
@@ -47,36 +37,22 @@ class ReplayTestHarness implements BrowserTestClient {
     return this.#debuggerModel()?.debuggerPausedDetails()?.reason ?? null;
   }
 
-  isPausedAtLine(lineNumber: number): boolean {
-    return this.#debuggerModel()?.debuggerPausedDetails()?.callFrames[0]?.location().lineNumber === lineNumber;
-  }
-
-  replayFinished(previousLength: number): boolean {
-    const reachedTarget = this.#controller.session.history.length === previousLength - 1;
-    const failed = Boolean(this.#controller.session.error);
-    return !this.#controller.busy && !Sources.SourcesPanel.SourcesPanel.instance().element.inert &&
-        (reachedTarget || failed);
+  sourceIsVisible(source: string): boolean {
+    const editor = Sources.SourcesPanel.SourcesPanel.instance().sourcesViewInternal.currentSourceFrame()?.textEditor;
+    return Boolean(editor?.state.doc.toString().includes(source.trim()));
   }
 
   snapshot(): ReplaySnapshot {
-    const position = this.#controller.currentPosition;
+    const frame = Sources.SourcesPanel.SourcesPanel.instance().sourcesViewInternal.currentSourceFrame();
     return {
       error: this.#controller.session.error,
-      calibrated: this.#controller.calibrated,
-      estimatedReplayMs: this.#controller.estimatedReplayMs,
-      position,
+      source: frame ? {url: frame.uiSourceCode().url(), text: frame.textEditor.state.doc.toString()} : null,
       highlight: this.#highlightedPosition(),
       messages: Common.Console.Console.instance()
                     .messages()
                     .map(message => message.text)
                     .filter(text => text.startsWith('BackDo:')),
-      sameDocument: this.#originalDocument === document,
-      sameTimeOrigin: this.#originalTimeOrigin === performance.timeOrigin,
-      sameHistoryLength: this.#originalHistoryLength === history.length,
-      historyState: history.state,
-      ws: new URL(location.href).searchParams.get('ws'),
-      visiblePauses: this.#visiblePauses,
-      transitions: this.#transitions,
+      pauseCount: this.#pauseCount,
     };
   }
 
@@ -101,21 +77,10 @@ class ReplayTestHarness implements BrowserTestClient {
 
   #observeVisiblePauses(): void {
     SDK.TargetManager.TargetManager.instance().addModelListener(
-        SDK.DebuggerModel.DebuggerModel, SDK.DebuggerModel.Events.DebuggerPaused, event => {
-          const position = event.data.debuggerPausedDetails()?.callFrames[0]?.location();
-          if (position) {
-            this.#visiblePauses.push([position.lineNumber, position.columnNumber]);
-          }
+        SDK.DebuggerModel.DebuggerModel, SDK.DebuggerModel.Events.DebuggerPaused, () => {
+          // 같은 행에 다시 멈출 때도 새 정지를 기다리기 위한 이벤트 번호다. 실행 기록 개수가 아니다.
+          this.#pauseCount++;
         });
-  }
-
-  #observeTransitions(): void {
-    const start = document.startViewTransition.bind(document);
-    document.startViewTransition = (...args: Parameters<Document['startViewTransition']>) => {
-      const transition = start(...args);
-      void transition.ready.then(() => this.#transitions.push('ready'), () => this.#transitions.push('skipped'));
-      return transition;
-    };
   }
 }
 

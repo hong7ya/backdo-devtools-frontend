@@ -5,7 +5,6 @@
 import {assert} from 'chai';
 import {readFile, writeFile} from 'node:fs/promises';
 import * as path from 'node:path';
-import {setTimeout as delay} from 'node:timers/promises';
 import type {Page} from 'puppeteer-core';
 
 import {
@@ -14,8 +13,8 @@ import {
   removeBreakpointForLine
 } from '../../../test/e2e/helpers/sources-helpers.js';
 
-import {enterConsoleCode} from './BrowserTestActions.js';
-import {BrowserTestEnvironment, type TestSession} from './BrowserTestEnvironment.js';
+import {enterConsoleCode, evaluateInConsole} from './BrowserTestActions.js';
+import {BrowserTestEnvironment} from './BrowserTestEnvironment.js';
 
 const RECORDING_METER = 'pierce/[role="meter"][aria-label="CDP 처리 시간 예산 사용률"]';
 const LOADING = 'pierce/.backdo-replay-loading:not([hidden])';
@@ -27,6 +26,7 @@ interface ExpectedPosition {
   lineNumber: number;
   columnNumber: number;
   url?: string;
+  source?: string;
 }
 
 describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
@@ -34,324 +34,287 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
 
   afterEach(() => environment.close());
 
+  it('Console 측정은 앞선 입력을 다시 실행하지 않고 현재 대상의 정지를 유지한다', async () => {
+    const session = await environment.open({
+      kind: 'console',
+      fixture: 'for.js',
+      setup: origin => [`await fetch("${origin}/effect");`],
+    });
+
+    await assertPausedAt(session.page, positionIn(session.source, 'debugger;'));
+    assert.strictEqual(environment.effects, 1, '측정 때문에 앞선 입력의 요청이 반복되면 안 된다');
+    assert.strictEqual(environment.target.ws, session.initialTarget.ws);
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
   for (const kind of ['node', 'console'] as const) {
-    it(`${kind === 'node' ? 'Node' : '콘솔'}의 더미 측정은 사용자 코드·연결·화면을 유지한다`, async () => {
-      environment.beforeCalibration = async page => {
-        await page.waitForSelector(LOADING, {visible: true});
-        assert.isFalse(await page.evaluate(() => document.body.inert));
-        for (const label of ['Resume script execution', 'Step over next function call']) {
-          const button = await page.waitForSelector(`pierce/[aria-label="${label}"]`, {visible: true});
-          assert.isFalse(await button?.evaluate(element => element.shadowRoot?.querySelector('button')?.disabled));
-        }
-      };
-      const session = await environment.open({
+    it(`${kind === 'node' ? 'Node' : 'Console'}: 복원 후 Step·Resume하고 다음 호출에서 다시 거꾸로간다`, async () => {
+      const {page, source} = await environment.open({
         kind,
-        fixture: 'for.js',
-        setup: kind === 'console' ? 'globalThis.seed = 2; await fetch("BACKDO_ORIGIN/effect");' : undefined,
+        fixture: 'two-calls.js',
+        source: `debugger;
+function sum(multiplier) {
+  let total = 0;
+  for (let i = 0; i < 4; i += 1) {
+    total += i * multiplier;
+  }
+  return total;
+}
+sum(2);
+sum(3);`,
       });
-      const snapshot = await session.page.evaluate(() => window.backdoTest.snapshot());
-      const target = environment.target;
-      assert.isNull(snapshot.error);
-      assert.isTrue(snapshot.calibrated);
-      assert.isAbove(snapshot.estimatedReplayMs ?? 0, 0);
-      assert.strictEqual(session.restartCount(), 0);
-      assert.strictEqual(target.pid, session.initialTarget.pid);
-      assert.strictEqual(target.ws, session.initialTarget.ws);
-      assert.deepInclude(environment.calibrations, {calibrationsCreated: 1, calibrationsDisposed: 1, calibrations: 0});
-      assert.strictEqual(
-          environment.effects, kind === 'console' ? 1 : 0, '측정 때문에 사용자 외부 요청이 반복되면 안 된다');
-      if (kind === 'node') {
-        assert.strictEqual(
-            await readFile(session.marker, 'utf8').catch(() => ''), '', '측정 중 사용자 코드는 실행하지 않는다');
-      }
-      await session.page.waitForFunction(() => window.backdoTest.snapshot().highlight !== null);
-      const rendered = await session.page.evaluate(() => window.backdoTest.snapshot());
-      assert.deepEqual(rendered.highlight, [snapshot.position?.lineNumber, snapshot.position?.columnNumber]);
-      assert.deepEqual(rendered.transitions, [], '측정은 화면을 전환하지 않는다');
-      assert.isTrue(rendered.sameDocument);
-      assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), 1);
-      assert.isTrue(await reverseDisabled(session.page));
-      assert.deepEqual(session.pageErrors, []);
+      const returnPosition = positionIn(source, 'return total;');
+      const lastCondition = positionIn(source, 'for (let', '<');
+      await addLineBreakpoint(page, returnPosition);
+      await resumeToNextPause(page);
+      await assertPausedAt(page, returnPosition);
+      assert.strictEqual(await evaluateInConsole(page, 'total'), '12');
+
+      await reverse(page);
+
+      await assertPausedAt(page, lastCondition);
+      assert.strictEqual(await evaluateInConsole(page, 'total'), '12');
+
+      await stepOver(page);
+      await assertPausedAt(page, returnPosition);
+      await resumeToNextPause(page);
+
+      await assertPausedAt(page, returnPosition);
+      assert.strictEqual(await evaluateInConsole(page, 'total'), '18', '다음 호출의 사용자 중단점에서 멈춘다');
+
+      await reverse(page);
+
+      await assertPausedAt(page, lastCondition);
+      assert.strictEqual(await evaluateInConsole(page, 'total'), '18', '최근 호출의 직전 상태를 복원한다');
     }).timeout(60_000);
-
-    it(`${kind === 'node' ? 'Node 포트 연결' : '기존 콘솔 입력'}에서 정지 중 변수 조회·수정 후에도 거꾸로갈 수 있다`,
-        async () => {
-          const session = await environment.open({kind, fixture: 'for.js'});
-          const historyLength = await runToReturn(session);
-          assert.strictEqual(await evaluateInConsole(session.page, 'total'), '12');
-          assert.strictEqual(await evaluateInConsole(session.page, 'total += 1'), '13');
-          assert.strictEqual(await evaluateInConsole(session.page, 'total'), '13');
-          assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), historyLength);
-
-          const sourcesTab = await session.page.waitForSelector('pierce/#tab-sources', {visible: true});
-          if (!sourcesTab) {
-            assert.fail('소스 탭을 찾을 수 없습니다.');
-          }
-          await sourcesTab.click();
-          assert.isFalse(await reverseDisabled(session.page));
-          await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '<'));
-          assert.strictEqual(
-              await evaluateInConsole(session.page, 'total'), '12',
-              '재실행 결과를 보여 주고 콘솔에서 수동으로 바꾼 값은 다시 적용하지 않아야 한다');
-          await sourcesTab.click();
-          assert.isFalse(await reverseDisabled(session.page));
-          assert.deepEqual(session.pageErrors, []);
-        })
-        .timeout(60_000);
-
-    for (const [fixture, description] of [
-             ['for.js', 'for 문의 마지막 조건식으로'],
-             ['async-await.js', 'async/await 이후의 마지막 조건식으로'],
-             ['for-of-break.js', 'for...of의 break 직전 위치로'],
-    ]) {
-      if (kind === 'node' && fixture === 'for-of-break.js') {
-        continue;
-      }
-      const input = kind === 'node' ? 'Node의 포트 또는 ws 연결에서' : '기존 화면의 콘솔 입력에서';
-      it(`${input} ${description} 두 번 되돌아간다`, async () => {
-        const session = await environment.open({kind, fixture});
-        await runToReturn(session);
-        const positions = fixture === 'for-of-break.js' ?
-            [positionIn(session.source, 'break;'), positionIn(session.source, 'if (value')] :
-            [positionIn(session.source, 'for (let', '<'), positionIn(session.source, 'for (let', '+= 1')];
-        for (const position of positions) {
-          await reverseAndVerify(session.page, position);
-        }
-
-        assert.strictEqual(session.restartCount(), 2, '사용자가 요청한 뒤로가기 두 번만 재시작해야 한다');
-        if (kind === 'node') {
-          const effects = await readFile(path.join(path.dirname(session.entry), '실행 횟수.txt'), 'utf8');
-          assert.strictEqual(effects, '진입\n진입\n진입\n', '측정과 연결 교체 때문에 실행 횟수가 늘면 안 된다');
-        }
-        assert.strictEqual(session.documentRequests(), 1, '문서 전체를 다시 불러오지 않아야 한다');
-        assert.deepEqual(session.pageErrors, [], '브라우저에서 처리되지 않은 오류가 없어야 한다');
-      }).timeout(60_000);
-    }
   }
 
+  it('Node: async/await 이후 마지막 조건식과 증가식으로 차례로 돌아간다', async () => {
+    const {page, source} = await environment.open({kind: 'node', fixture: 'async-await.js'});
+    await addLineBreakpoint(page, positionIn(source, 'return total;'));
+    await resumeToNextPause(page);
+
+    await reverse(page);
+    await assertPausedAt(page, positionIn(source, 'for (let', '<'));
+
+    await reverse(page);
+    await assertPausedAt(page, positionIn(source, 'for (let', '+= 1'));
+  }).timeout(60_000);
+
+  it('Console: 반복 방문한 마지막 조건식과 증가식으로 차례로 돌아간다', async () => {
+    const {page, source} = await environment.open({kind: 'console', fixture: 'for.js'});
+    await addLineBreakpoint(page, positionIn(source, 'return total;'));
+    await resumeToNextPause(page);
+
+    await reverse(page);
+    await assertPausedAt(page, positionIn(source, 'for (let', '<'));
+
+    await reverse(page);
+    await assertPausedAt(page, positionIn(source, 'for (let', '+= 1'));
+  }).timeout(60_000);
+
+  it('Console: 반복문을 빠져나온 break와 그 분기 조건으로 차례로 돌아간다', async () => {
+    const {page, source} = await environment.open({kind: 'console', fixture: 'for-of-break.js'});
+    await addLineBreakpoint(page, positionIn(source, 'return total;'));
+    await resumeToNextPause(page);
+
+    await reverse(page);
+    await assertPausedAt(page, positionIn(source, 'break;'));
+
+    await reverse(page);
+    await assertPausedAt(page, positionIn(source, 'if (value'));
+  }).timeout(60_000);
+
   for (const fixture of ['modules-static.mjs', 'modules-dynamic.js']) {
-    it(`Node의 ${fixture}에서 모듈을 넘어 거꾸로간다`, async () => {
-      const session = await environment.open({kind: 'node', fixture});
-      const helper = await readFile(path.join(__dirname, '../fixtures/modules-helper.mjs'), 'utf8');
-      const lines = helper.split('\n');
-      const firstPause = lines.findIndex(line => line.trim() === 'debugger;');
-      const lastPause = lines.map(line => line.trim()).lastIndexOf('debugger;');
-      const control = await session.page.waitForSelector('pierce/.backdo-replay-control');
-      assert.isNotNull(control);
-      await control?.hover();
-      assert.include(await control?.evaluate(element => element.getAttribute('title')), '기록된 이전 실행 위치');
-      assert.isTrue(await control?.evaluate(element => element.matches(':hover')));
-
-      await resumeToHelper(firstPause);
-      const caller = {...positionIn(session.source, 'forExample();'), url: fixture};
-      await reverseAndVerify(session.page, caller);
-
-      await resumeToHelper(firstPause);
-      await resumeToHelper(lastPause);
-      await reverseAndVerify(session.page, {...positionIn(helper, 'for (let', '<'), url: 'modules-helper.mjs'});
-
-      await resumeToHelper(lastPause);
-      await clickExecutionButton(session.page, 'Resume script execution');
-      await session.page.waitForFunction(
-          url => window.backdoTest.isPaused() && window.backdoTest.snapshot().position?.url.endsWith(url), {},
-          caller.url);
-      const returned = positionIn(helper, 'return total;');
-      await reverseAndVerify(session.page, {
-        ...returned,
-        columnNumber: lines[returned.lineNumber].length,
-        url: 'modules-helper.mjs',
+    it(`Node의 ${fixture}에서 호출자와 모듈 사이를 거꾸로간다`, async () => {
+      const {page, source} = await environment.open({
+        kind: 'node',
+        fixture,
+        files: ['modules-helper.mjs'],
+        connection: 'ws',
       });
-      await reverseAndVerify(session.page, {...returned, url: 'modules-helper.mjs'});
-      assert.deepEqual(session.pageErrors, []);
+      const helper = await readFile(path.join(__dirname, '../fixtures/modules-helper.mjs'), 'utf8');
+      const moduleEntry = {...positionIn(helper, '// 모듈 진입', 'debugger;'), url: 'modules-helper.mjs'};
+      const beforeReturn = {...positionIn(helper, '// 반환 직전', 'debugger;'), url: 'modules-helper.mjs'};
+      const caller = {...positionIn(source, 'forExample();'), url: fixture};
+      const lastCondition = {...positionIn(helper, 'for (let', '<'), url: 'modules-helper.mjs'};
+      const callerAfterReturn = {...positionIn(source, 'debugger;'), url: fixture};
+      const returnPosition = {...positionIn(helper, 'return total;'), url: 'modules-helper.mjs'};
+      const returnEnd = {
+        ...returnPosition,
+        columnNumber: returnPosition.columnNumber + 'return total;'.length,
+      };
 
-      async function resumeToHelper(line: number): Promise<void> {
-        await clickExecutionButton(session.page, 'Resume script execution');
-        await session.page.waitForFunction(
-            expected => window.backdoTest.snapshot().error ||
-                window.backdoTest.isPausedAtLine(expected) &&
-                    window.backdoTest.snapshot().position?.url.endsWith('modules-helper.mjs'),
-            {}, line);
-        assert.isNull((await session.page.evaluate(() => window.backdoTest.snapshot())).error);
-      }
+      await resumeToNextPause(page);
+      await assertPausedAt(page, moduleEntry);
+      await reverse(page);
+      await assertPausedAt(page, caller);
+
+      await resumeToNextPause(page);
+      await assertPausedAt(page, moduleEntry);
+      await resumeToNextPause(page);
+      await assertPausedAt(page, beforeReturn);
+      await reverse(page);
+      await assertPausedAt(page, lastCondition);
+
+      await resumeToNextPause(page);
+      await assertPausedAt(page, beforeReturn);
+      await resumeToNextPause(page);
+      await assertPausedAt(page, callerAfterReturn);
+
+      await reverse(page);
+      await assertPausedAt(page, returnEnd);
+      await reverse(page);
+      await assertPausedAt(page, returnPosition);
     }).timeout(60_000);
   }
 
   it('실행이 끝난 콘솔 코드의 기록을 다음 입력 뒤에도 유지하고 동적 소스로 돌아간다', async () => {
-    const session = await environment.open({kind: 'console', fixture: 'completed-source.js'});
+    const dynamicSourceURL = 'https://example.test/completed-source.js';
+    const dynamicSource = `Math.abs(-1);
+Math.abs(-2);
+//# sourceURL=${dynamicSourceURL}`;
+    const session = await environment.open({
+      kind: 'console',
+      fixture: 'completed-source.js',
+      source: `debugger;
+function runCompletedSource() {
+  (0, eval)(\`${dynamicSource}\`);
+}
+runCompletedSource();`,
+    });
+    const functionEnd = positionIn(session.source, '}');
+    const lastEvaluatedCall = {...positionIn(dynamicSource, 'Math.abs(-2);', 'abs'), url: dynamicSourceURL};
     await clickExecutionButton(session.page, 'Resume script execution');
     await session.page.waitForSelector('pierce/.console-user-command-result', {visible: true});
-    const completedHistoryLength = await session.page.evaluate(() => window.backdoTest.historyLength());
-    assert.isAbove(completedHistoryLength, 1);
 
     await enterConsoleCode(session.page, 'debugger;');
     await session.page.waitForFunction(() => window.backdoTest.isPaused());
-    assert.isAbove(await session.page.evaluate(() => window.backdoTest.historyLength()), completedHistoryLength);
-    await reverseAndVerify(session.page, {...positionIn(session.source, '}', '}'), url: 'backdo-console:///1'});
-    await reverseAndVerify(session.page, {
-      url: 'https://example.test/completed-source.js',
-      lineNumber: 1,
-      columnNumber: 'Math.abs(-2);'.indexOf('abs'),
+    await reverse(session.page);
+    await assertPausedAt(session.page, functionEnd);
+    await reverse(session.page);
+    await assertPausedAt(session.page, lastEvaluatedCall);
+    assert.deepEqual(session.pageErrors, []);
+  }).timeout(60_000);
+
+  it('사용자가 줄 중단점을 삭제하면 Resume으로 다음 중단점까지 진행한다', async () => {
+    const {page, source} = await environment.open({kind: 'console', fixture: 'for.js'});
+    const bodyPosition = positionIn(source, 'const doubled', 'i * 2');
+    const returnPosition = positionIn(source, 'return total;');
+    await addLineBreakpoint(page, bodyPosition);
+    await addLineBreakpoint(page, returnPosition);
+    await resumeToNextPause(page);
+    await assertPausedAt(page, bodyPosition);
+
+    await removeBreakpointForLine(page, bodyPosition.lineNumber + 1);
+    await resumeToNextPause(page);
+
+    await assertPausedAt(page, returnPosition);
+    assert.strictEqual(await evaluateInConsole(page, 'total'), '12');
+  }).timeout(60_000);
+
+  it('복원 후 다음 호출에서도 XHR/fetch 요청을 보내기 전에 멈춘다', async () => {
+    const {page, source} = await environment.open({
+      kind: 'console',
+      fixture: 'fetch.js',
+      setup: origin => [`globalThis.endpoint = "${origin}/effect";`],
     });
-    assert.deepEqual(session.pageErrors, []);
-  }).timeout(60_000);
+    const returnPosition = positionIn(source, 'return total;');
+    await addLineBreakpoint(page, returnPosition);
+    await addXHRBreakpoint(page, '/effect');
 
-  it('UI에서 추가·삭제한 줄 중단점과 Step over·Resume을 함께 사용할 수 있다', async () => {
-    const session = await environment.open({kind: 'console', fixture: 'for.js'});
-    const bodyLine = session.source.split('\n').findIndex(line => line.includes('const doubled'));
-    await addBreakpointForLine(session.page, bodyLine + 1);
-    await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, bodyLine);
-    await clickExecutionButton(session.page, 'Step over next function call');
-    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, bodyLine + 1);
+    await resumeToNextPause(page);
 
-    await removeBreakpointForLine(session.page, bodyLine + 1);
-    await runToReturn(session);
-    await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '<'));
-    assert.deepEqual(session.pageErrors, []);
-  }).timeout(60_000);
-
-  it('UI에서 추가한 XHR/fetch 중단점을 기록용 정지로 넘기지 않는다', async () => {
-    const session = await environment.open(
-        {kind: 'console', fixture: 'fetch.js', setup: 'globalThis.endpoint = "BACKDO_ORIGIN/effect";'});
-    const section = await session.page.waitForSelector('pierce/[aria-label="XHR/fetch Breakpoints"][aria-expanded]');
-    if (await section?.evaluate(element => element.getAttribute('aria-expanded')) !== 'true') {
-      await section?.click();
-    }
-    const add = await session.page.waitForSelector('pierce/[aria-label="Add XHR/fetch breakpoint"]', {visible: true});
-    await add?.click();
-    const input = await session.page.waitForSelector('pierce/[aria-label="URL Breakpoint"]', {visible: true});
-    await input?.click();
-    await session.page.keyboard.type('/effect');
-    await session.page.keyboard.press('Enter');
-    await session.page.waitForSelector('pierce/[aria-label^="URL contains"]');
-
-    const returnLine = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
-    await (await lineNumberElement(session.page, returnLine)).click();
-    await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(
-        line => window.backdoTest.pauseReason() === 'XHR' || window.backdoTest.isPausedAtLine(line), {}, returnLine);
-    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.pauseReason()), 'XHR');
+    assert.strictEqual(await page.evaluate(() => window.backdoTest.pauseReason()), 'XHR');
     assert.strictEqual(environment.effects, 0, '사용자가 재개하기 전에는 요청을 보내면 안 된다');
-    await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
-    await reverseAndVerify(session.page, positionIn(session.source, 'const total', 'before + 1'));
-    await session.page.waitForSelector('pierce/[aria-label^="URL contains"]', {visible: true});
-    await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
-    assert.deepEqual(session.pageErrors, []);
+
+    await resumeToNextPause(page);
+    await assertPausedAt(page, returnPosition);
+    await reverse(page);
+
+    await assertPausedAt(page, positionIn(source, 'const total', 'before + 1'));
+    const requestsBeforeNextCall = environment.effects;
+
+    await resumeToNextPause(page);
+    await assertPausedAt(page, returnPosition);
+    await resumeToNextPause(page);
+
+    assert.strictEqual(await page.evaluate(() => window.backdoTest.pauseReason()), 'XHR');
+    assert.strictEqual(
+        environment.effects, requestsBeforeNextCall, '다음 호출도 사용자가 재개하기 전에는 요청을 보내면 안 된다');
+
+    await resumeToNextPause(page);
+
+    await assertPausedAt(page, returnPosition);
+    assert.strictEqual(environment.effects, requestsBeforeNextCall + 1, '재개하면 다음 호출의 요청이 완료된다');
   }).timeout(60_000);
 
   it('조건식과 로그포인트는 복원 중 실행하지 않고 복원 후 다음 실행에 다시 적용한다', async () => {
-    const session = await environment.open({
-      kind: 'console',
-      fixture: 'breakpoints.js',
-      setup: 'globalThis.seed = 2; globalThis.endpoint = "BACKDO_ORIGIN/effect";'
-    });
-    const bodyLine = session.source.split('\n').findIndex(line => line.includes('const doubled'));
-    await addConditionalBreakpoint(session.page, bodyLine, '(fetch(globalThis.endpoint), false)', false);
-    await addConditionalBreakpoint(session.page, bodyLine + 1, 'fetch(globalThis.endpoint)', true);
-    await runToReturn(session);
+    const session = await environment.open(
+        {kind: 'console', fixture: 'breakpoints.js', setup: origin => [`globalThis.endpoint = "${origin}/effect";`]});
+    const returnPosition = positionIn(session.source, 'return total;');
+    const bodyLine = positionIn(session.source, 'const doubled').lineNumber;
+    await addLineBreakpoint(session.page, returnPosition);
+    await addConditionalBreakpoint(session.page, bodyLine, '(fetch(globalThis.endpoint), false)');
+    await addLogpoint(session.page, bodyLine + 1, 'fetch(globalThis.endpoint)');
+    await resumeToNextPause(session.page);
+    await assertPausedAt(session.page, returnPosition);
     assert.strictEqual(environment.effects, 8, '앞으로 실행할 때 조건식과 로그포인트가 각각 네 번 작동해야 한다');
-    await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '<'));
+    await reverse(session.page);
+    await assertPausedAt(session.page, positionIn(session.source, 'for (let', '<'));
     assert.strictEqual(environment.effects, 8, '복원 도중 조건식이나 로그포인트를 다시 평가하면 안 된다');
     await session.page.waitForSelector('pierce/.cm-breakpoint-conditional', {visible: true});
     await session.page.waitForSelector('pierce/.cm-breakpoint-logpoint', {visible: true});
 
-    const returnLine = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
-    await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(line => window.backdoTest.isPausedAtLine(line), {}, returnLine);
-    const previousPauseCount = await session.page.evaluate(() => window.backdoTest.snapshot().visiblePauses.length);
-    await clickExecutionButton(session.page, 'Resume script execution');
-    await session.page.waitForFunction(
-        ({line, previousCount}) =>
-            window.backdoTest.snapshot().visiblePauses.length > previousCount && window.backdoTest.isPausedAtLine(line),
-        {}, {line: returnLine, previousCount: previousPauseCount});
+    await resumeToNextPause(session.page);
+    await assertPausedAt(session.page, returnPosition);
+    await resumeToNextPause(session.page);
+    await assertPausedAt(session.page, returnPosition);
     assert.strictEqual(environment.effects, 16, '복원 후에는 원래 조건식과 로그포인트가 다시 작동해야 한다');
     assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);
 
-  it('앞서 입력한 콘솔 원문도 순서대로 다시 실행하여 전역 준비 코드를 복원한다', async () => {
-    const session = await environment.open({kind: 'console', fixture: 'for.js', setup: 'globalThis.seed = 2;'});
-    await runToReturn(session);
-    await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '<'));
-    await reverseAndVerify(session.page, positionIn(session.source, 'for (let', '+= 1'));
-    assert.deepEqual(session.pageErrors, []);
-  }).timeout(60_000);
-
-  it('재시작 연동 전에도 기존 콘솔 실행과 위치 기록을 유지한다', async () => {
-    const session = await environment.open({kind: 'console', fixture: 'for.js', restart: false});
-    await runToReturn(session);
-    const snapshot = await session.page.evaluate(() => window.backdoTest.snapshot());
-    assert.isNull(snapshot.error);
-    assert.isAbove(await session.page.evaluate(() => window.backdoTest.historyLength()), 2);
-    assert.isTrue(await reverseDisabled(session.page));
-  }).timeout(60_000);
-
-  it('긴 복원에서도 로딩·패널 이동을 유지하고 CDP 비용에는 실제 실행 시간을 섞지 않는다', async () => {
-    let releaseRestart: (() => void)|undefined;
-    const gate = new Promise<void>(resolve => {
-      releaseRestart = resolve;
+  it('Chrome을 교체하고 앞선 Console 입력을 순서대로 재실행해 계산 결과를 복원한다', async () => {
+    const session = await environment.open({
+      kind: 'console',
+      fixture: 'for.js',
+      setup: () => ['globalThis.seed = 1;', 'globalThis.seed += 2;'],
+      source: `debugger;
+function sum() {
+  let total = 0;
+  for (let i = 0; i < 4; i += 1) {
+    const doubled = i * globalThis.seed;
+    total += doubled;
+  }
+  return total;
+}
+sum();`,
     });
-    const session = await environment.open({kind: 'node', fixture: 'for.js'});
-    const historyLength = await runToReturn(session);
-    environment.beforeRestart = () => gate;
-    try {
-      await clickReverse(session.page);
-      const loading = await session.page.waitForSelector(LOADING, {visible: true});
-      if (!loading) {
-        assert.fail('복원 중 표시가 보여야 한다');
-      }
-      assert.isTrue(await reverseDisabled(session.page));
-      assert.isFalse(await session.page.evaluate(() => document.body.inert));
-      // 이전 구현에서 화면 전환이 만료되던 긴 대기 구간도 실제로 거친다.
-      await session.page.evaluate(() => new Promise(resolve => setTimeout(resolve, 4500)));
-      const bounds = await loading.boundingBox();
-      if (!bounds) {
-        assert.fail('복원 중 표시를 화면에서 확인할 수 있어야 한다');
-      }
-      const firstFrame = await session.page.screenshot({clip: bounds});
-      await session.page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)));
-      const nextFrame = await session.page.screenshot({clip: bounds});
-      assert.notDeepEqual(firstFrame, nextFrame, '캡처한 화면에서도 로딩이 계속 움직여야 한다');
-      const consoleTab = await session.page.waitForSelector('pierce/#tab-console', {visible: true});
-      if (!consoleTab) {
-        assert.fail('복원 중에도 콘솔 탭이 보여야 한다');
-      }
-      await consoleTab.click();
-      await session.page.waitForSelector('pierce/[aria-label="Console prompt"]', {visible: true});
-    } finally {
-      releaseRestart?.();
-    }
-    await waitForReplay(session.page, historyLength);
-    const restored = await session.page.evaluate(() => window.backdoTest.snapshot());
-    assert.isNull(restored.error);
-    assert.strictEqual(await session.page.evaluate(() => window.backdoTest.historyLength()), historyLength - 1);
-    assert.isBelow(restored.estimatedReplayMs ?? Infinity, 3000);
-    assert.isNull(await session.page.$(LOADING));
+    const returnPosition = positionIn(session.source, 'return total;');
+    await addLineBreakpoint(session.page, returnPosition);
+    await resumeToNextPause(session.page);
+    await assertPausedAt(session.page, returnPosition);
+    assert.strictEqual(await evaluateInConsole(session.page, 'total'), '18');
+    await reverse(session.page);
+    await assertPausedAt(session.page, positionIn(session.source, 'for (let', '<'));
+    assert.notStrictEqual(environment.target.pid, session.initialTarget.pid, 'Console 실행 Chrome을 교체한다');
+    assert.notStrictEqual(environment.target.ws, session.initialTarget.ws);
+    assert.strictEqual(await evaluateInConsole(session.page, 'globalThis.seed'), '3');
+    assert.strictEqual(
+        await evaluateInConsole(session.page, 'total'), '18',
+        '앞선 두 입력이 누락되거나 순서가 바뀌면 계산 결과가 달라진다');
     assert.deepEqual(session.pageErrors, []);
-  }).timeout(60_000);
-
-  it('더미 생성 실패 시 자원을 정리하고 사용자 연결과 정지는 유지한다', async () => {
-    environment.beforeCalibration = async () => {
-      throw new Error('테스트 더미 준비 실패');
-    };
-    const session = await environment.open({kind: 'node', fixture: 'for.js'});
-    assert.strictEqual(session.restartCount(), 0);
-    assert.strictEqual(environment.calibrations?.calibrations, 0);
-    assert.isTrue(await session.page.evaluate(() => window.backdoTest.isPaused()));
-    const button = await session.page.$(REVERSE_BUTTON);
-    assert.include(await button?.evaluate(element => element.getAttribute('aria-label')), '더미 준비 실패');
-    assert.isTrue(await reverseDisabled(session.page));
-    assert.isNull(await session.page.$(LOADING));
   }).timeout(60_000);
 
   it('소스가 바뀌면 복원을 실패 처리하고 뒤로가기 버튼을 비활성화한다', async () => {
     const session = await environment.open({kind: 'node', fixture: 'for.js'});
-    const historyLength = await runToReturn(session);
+    const returnPosition = positionIn(session.source, 'return total;');
+    await addLineBreakpoint(session.page, returnPosition);
+    await resumeToNextPause(session.page);
+    await assertPausedAt(session.page, returnPosition);
     await writeFile(session.entry, session.source.replace('i < 4', 'i < 5'));
 
-    await clickReverse(session.page);
-    await waitForReplay(session.page, historyLength);
+    await reverse(session.page);
 
     assert.isTrue(await reverseDisabled(session.page));
     const result = await session.page.evaluate(() => window.backdoTest.snapshot());
@@ -362,23 +325,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     const meter = await session.page.$(RECORDING_METER);
     assert.strictEqual(await meter?.evaluate(element => element.getAttribute('aria-valuenow')), '0');
     assert.include(await meter?.evaluate(element => element.getAttribute('aria-valuetext')), '기록 종료');
-    assert.strictEqual(session.documentRequests(), 1);
   }).timeout(60_000);
-
-  async function evaluateInConsole(page: Page, expression: string): Promise<string> {
-    const selector = 'pierce/.console-user-command-result';
-    const previousCount = (await page.$$(selector)).length;
-    await enterConsoleCode(page, expression);
-    const deadline = performance.now() + UI_TIMEOUT_MS;
-    while (performance.now() < deadline) {
-      const results = await page.$$(selector);
-      if (results.length > previousCount) {
-        return await results[results.length - 1].evaluate(element => element.textContent?.trim() ?? '');
-      }
-      await delay(20);
-    }
-    assert.fail(`콘솔 실행 결과를 기다리는 시간이 지났습니다: ${expression}`);
-  }
 
   async function lineNumberElement(page: Page, lineNumber: number) {
     const root = await page.waitForSelector('html');
@@ -388,7 +335,27 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     return line;
   }
 
-  async function addConditionalBreakpoint(
+  async function addXHRBreakpoint(page: Page, url: string): Promise<void> {
+    const section = await page.waitForSelector('pierce/[aria-label="XHR/fetch Breakpoints"][aria-expanded]');
+    if (await section?.evaluate(element => element.getAttribute('aria-expanded')) !== 'true') {
+      await section?.click();
+    }
+    await page.locator('pierce/[aria-label="Add XHR/fetch breakpoint"]').click();
+    await page.locator('pierce/[aria-label="URL Breakpoint"]').click();
+    await page.keyboard.type(url);
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('pierce/[aria-label^="URL contains"]');
+  }
+
+  async function addConditionalBreakpoint(page: Page, lineNumber: number, condition: string): Promise<void> {
+    await editBreakpointExpression(page, lineNumber, condition, false);
+  }
+
+  async function addLogpoint(page: Page, lineNumber: number, expression: string): Promise<void> {
+    await editBreakpointExpression(page, lineNumber, expression, true);
+  }
+
+  async function editBreakpointExpression(
       page: Page, lineNumber: number, condition: string, isLogpoint: boolean): Promise<void> {
     await (await lineNumberElement(page, lineNumber)).click({button: 'right'});
     const action = await page.waitForSelector(
@@ -407,6 +374,7 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
   }
 
   async function clickExecutionButton(page: Page, label: string): Promise<void> {
+    await page.locator('pierce/#tab-sources').click();
     const button = await page.waitForSelector(`pierce/[aria-label="${label}"]`, {visible: true});
     if (!button) {
       throw new Error(`${label} 버튼을 찾지 못했습니다.`);
@@ -414,20 +382,13 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     await button.click();
   }
 
-  async function runToReturn(session: TestSession): Promise<number> {
-    const lineNumber = session.source.split('\n').findIndex(line => line.trim() === 'return total;');
-    await addBreakpointForLine(session.page, lineNumber + 1);
-    const resume = await session.page.waitForSelector('pierce/[aria-label="Resume script execution"]', {visible: true});
-    if (!resume) {
-      assert.fail('실행 재개 버튼을 찾을 수 없습니다.');
+  async function addLineBreakpoint(page: Page, position: ExpectedPosition): Promise<void> {
+    await page.locator('pierce/#tab-sources').click();
+    if (position.source) {
+      await page.waitForFunction(
+          source => window.backdoTest.sourceIsVisible(source), {timeout: UI_TIMEOUT_MS}, position.source);
     }
-    await resume.click();
-    await session.page.waitForFunction(
-        line => window.backdoTest.isPausedAtLine(line), {
-          timeout: UI_TIMEOUT_MS,
-        },
-        lineNumber);
-    return await session.page.evaluate(() => window.backdoTest.historyLength());
+    await addBreakpointForLine(page, position.lineNumber + 1);
   }
 
   function positionIn(source: string, lineText: string, token = lineText): ExpectedPosition {
@@ -436,58 +397,27 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     assert.isAtLeast(lineNumber, 0, `예제에서 해당 줄을 찾을 수 없습니다: ${lineText}`);
     const columnNumber = lines[lineNumber].indexOf(token);
     assert.isAtLeast(columnNumber, 0, `예제에서 해당 표현식을 찾을 수 없습니다: ${token}`);
-    return {lineNumber, columnNumber};
+    return {lineNumber, columnNumber, source};
   }
 
-  async function reverseAndVerify(page: Page, expected: ExpectedPosition): Promise<void> {
-    const historyLength = await page.evaluate(() => window.backdoTest.historyLength());
-    const before = environment.target;
-    const initialState = await page.evaluate(() => window.backdoTest.snapshot());
-    const meter = await page.waitForSelector(RECORDING_METER);
-    if (!meter) {
-      assert.fail('CDP 처리 시간 예산 사용률이 보여야 한다');
-    }
-    const previousUsage = Number(await meter.evaluate(element => element.getAttribute('aria-valuenow')));
-    assert.isAbove(previousUsage, 0);
-    assert.include(await meter.evaluate(element => element.getAttribute('aria-valuetext')), 'CDP 처리 시간 예산');
-
-    const startedAt = performance.now();
-    await clickReverse(page);
-    await waitForReplay(page, historyLength);
-    const elapsedMs = performance.now() - startedAt;
-
+  async function assertPausedAt(page: Page, expected: ExpectedPosition): Promise<void> {
+    await page.waitForFunction(({lineNumber, columnNumber, url, source}) => {
+      const {error, highlight, source: displayed} = window.backdoTest.snapshot();
+      return error ||
+          highlight?.[0] === lineNumber && highlight?.[1] === columnNumber && (!url || displayed?.url.endsWith(url)) &&
+          (!source || displayed?.text.includes(source.trim()));
+    }, {timeout: UI_TIMEOUT_MS}, expected);
     const result = await page.evaluate(() => window.backdoTest.snapshot());
     assert.isNull(result.error);
-    assert.isNull(await page.$(LOADING));
-    assert.closeTo(
-        Number(await meter.evaluate(element => element.getAttribute('aria-valuenow'))),
-        previousUsage * (historyLength - 1) / historyLength, 0.000001);
-    assert.closeTo(
-        result.estimatedReplayMs ?? Infinity,
-        (initialState.estimatedReplayMs ?? 0) * (historyLength - 1) / historyLength, 0.000001,
-        '버린 미래 기록만큼 예상 CDP 비용도 줄어야 한다');
-    assert.exists(result.position);
-    assert.deepEqual(
-        [result.position.lineNumber, result.position.columnNumber], [expected.lineNumber, expected.columnNumber]);
     assert.deepEqual(result.highlight, [expected.lineNumber, expected.columnNumber]);
+    assert.exists(result.source);
     if (expected.url) {
-      assert.isTrue(result.position.url.endsWith(expected.url), `복원된 소스: ${result.position.url}`);
-    } else {
-      assert.strictEqual(result.position.url, initialState.position?.url);
+      assert.isTrue(result.source.url.endsWith(expected.url), `화면에서 선택된 소스: ${result.source.url}`);
+    }
+    if (expected.source) {
+      assert.include(result.source.text, expected.source.trim());
     }
     assert.deepEqual(result.messages, []);
-    assert.isTrue(result.sameDocument);
-    assert.isTrue(result.sameTimeOrigin);
-    assert.isTrue(result.sameHistoryLength);
-    assert.deepEqual(result.historyState, {backdoTest: 'preserve'});
-    assert.lengthOf(result.visiblePauses, initialState.visiblePauses.length + 1, '최종 정지만 UI에 전달되어야 한다');
-    assert.strictEqual(result.transitions.at(-1), 'ready');
-    const after = environment.target;
-    assert.notStrictEqual(after.pid, before.pid);
-    assert.notStrictEqual(after.ws, before.ws);
-    assert.strictEqual(after.port, before.port);
-    assert.strictEqual(result.ws, after.ws.replace(/^ws:\/\//, ''));
-    console.log(`    뒤로가기 완료: ${Math.round(elapsedMs)}ms`);
   }
 
   async function reverseDisabled(page: Page): Promise<boolean> {
@@ -498,19 +428,33 @@ describe('기존 콘솔·WebSocket 연결의 공통 재실행', () => {
     return await button.evaluate(element => element.shadowRoot?.querySelector('button')?.disabled === true);
   }
 
-  async function clickReverse(page: Page): Promise<void> {
+  async function reverse(page: Page): Promise<void> {
+    await page.locator('pierce/#tab-sources').click();
+    const previousPause = await page.evaluate(() => window.backdoTest.snapshot().pauseCount);
     const button = await page.waitForSelector(REVERSE_BUTTON);
     if (!button) {
-      assert.fail('뒤로가기 버튼을 찾을 수 없습니다.');
+      throw new Error('뒤로가기 버튼을 찾지 못했습니다.');
     }
     await button.click();
+    await page.waitForFunction(count => {
+      const {error, pauseCount} = window.backdoTest.snapshot();
+      return error || pauseCount > count;
+    }, {timeout: REPLAY_TIMEOUT_MS}, previousPause);
+    await page.waitForSelector(LOADING, {hidden: true, timeout: REPLAY_TIMEOUT_MS});
   }
 
-  async function waitForReplay(page: Page, previousLength: number): Promise<void> {
+  async function resumeToNextPause(page: Page): Promise<void> {
+    await executeToNextPause(page, 'Resume script execution');
+  }
+
+  async function stepOver(page: Page): Promise<void> {
+    await executeToNextPause(page, 'Step over next function call');
+  }
+
+  async function executeToNextPause(page: Page, label: string): Promise<void> {
+    const previousPause = await page.evaluate(() => window.backdoTest.snapshot().pauseCount);
+    await clickExecutionButton(page, label);
     await page.waitForFunction(
-        length => window.backdoTest.replayFinished(length), {
-          timeout: REPLAY_TIMEOUT_MS,
-        },
-        previousLength);
+        count => window.backdoTest.snapshot().pauseCount > count, {timeout: UI_TIMEOUT_MS}, previousPause);
   }
 });

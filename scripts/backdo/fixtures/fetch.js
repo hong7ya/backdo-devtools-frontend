@@ -2,10 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-function fetchExample() {
+// eslint-disable-next-line no-debugger -- Console 입력의 시작 정지를 명시한다.
+debugger;
+
+async function fetchExample() {
   const before = 1;
-  fetch(globalThis.endpoint);
+  await fetch(globalThis.endpoint);
   const total = before + 1;
   return total;
 }
-fetchExample();
+await fetchExample();
+await fetchExample();

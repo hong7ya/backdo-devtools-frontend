@@ -68,13 +68,18 @@ export class ScreencastApp implements Common.App.App,
     }
     this.screenCaptureModel = screenCaptureModel;
     this.toggleButton.setEnabled(true);
-    this.screencastView?.detach();
+    const previousView = this.screencastView;
+    const replaying = Replay.ReplayController.ReplayController.instance().busy;
     this.screencastView = new ScreencastView(screenCaptureModel);
+    this.screencastView.initialize();
+    if (replaying && previousView) {
+      this.screencastView.retainFrameFrom(previousView);
+    }
+    this.screencastView.setReplayInProgress(replaying);
+    previousView?.detach();
     if (this.rootSplitWidget) {
       this.rootSplitWidget.setMainWidget(this.screencastView);
     }
-    this.screencastView.initialize();
-    this.screencastView.setReplayInProgress(Replay.ReplayController.ReplayController.instance().busy);
     this.onScreencastEnabledChanged();
   }
 

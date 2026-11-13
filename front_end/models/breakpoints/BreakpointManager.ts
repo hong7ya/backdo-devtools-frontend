@@ -171,7 +171,7 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     }
     const uiSourceCode = await this.getUISourceCodeWithUpdatedBreakpointInfo(script);
     if (this.storage.breakpointItems(BreakpointManager.breakpointSource(uiSourceCode)).length) {
-      await this.#restoreBreakpointsForUrl(uiSourceCode);
+      await this.#restoreBreakpointsForSource(uiSourceCode);
     }
 
     const debuggerModel = script.debuggerModel;
@@ -182,7 +182,7 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
         if (this.#hasBreakpointsForUrl(sourceURL)) {
           const uiSourceCode = await this.debuggerWorkspaceBinding.uiSourceCodeForSourceMapSourceURLPromise(
               debuggerModel, sourceURL, script.isContentScript());
-          await this.#restoreBreakpointsForUrl(uiSourceCode);
+          await this.#restoreBreakpointsForSource(uiSourceCode);
         }
       }
     }
@@ -197,7 +197,7 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
               await this.debuggerWorkspaceBinding.uiSourceCodeForDebuggerLanguagePluginSourceURLPromise(
                   debuggerModel, sourceURL);
           assertNotNullOrUndefined(uiSourceCode);
-          await this.#restoreBreakpointsForUrl(uiSourceCode);
+          await this.#restoreBreakpointsForSource(uiSourceCode);
         }
       }
     }
@@ -226,7 +226,7 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     }
   }
 
-  async #restoreBreakpointsForUrl(uiSourceCode: Workspace.UISourceCode.UISourceCode): Promise<void> {
+  async #restoreBreakpointsForSource(uiSourceCode: Workspace.UISourceCode.UISourceCode): Promise<void> {
     this.restoreBreakpoints(uiSourceCode);
     const breakpoints = this.#breakpointByStorageId.values();
     const affectedBreakpoints = Array.from(breakpoints).filter(x => x.uiSourceCodes.has(uiSourceCode));
@@ -564,19 +564,6 @@ export class Breakpoint implements SDK.TargetManager.SDKModelObserver<SDK.Debugg
       // User is setting the breakpoint in an existing source.
       console.assert(primaryUISourceCode.contentType().name() === storageState.resourceTypeName);
       this.addUISourceCode(primaryUISourceCode);
-    } else if (
-        !storageState.resolvedState && storageState.resourceTypeName === Common.ResourceType.resourceTypes.Script.name()) {
-      // Pre-register stored script locations before their sources are loaded.
-      this.#storageState = {
-        ...storageState,
-        resolvedState: [{
-          url: storageState.scriptHash ? '' as Platform.DevToolsPath.UrlString : storageState.url,
-          scriptHash: storageState.scriptHash ?? '',
-          lineNumber: storageState.lineNumber,
-          columnNumber: storageState.columnNumber,
-          condition: this.backendCondition(),
-        }],
-      };
     }
 
     this.breakpointManager.targetManager.observeModels(SDK.DebuggerModel.DebuggerModel, this);

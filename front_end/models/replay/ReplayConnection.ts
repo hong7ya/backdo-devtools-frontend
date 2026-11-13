@@ -78,9 +78,9 @@ export class ReplayConnection {
   }
 
   async initialize(options: ConnectionOptions, url = new URL(location.href)): Promise<boolean> {
-    // 기존 inspector 등 다른 DevTools 화면은 원래 연결 경로를 유지한다.
+    // Console은 기본 화면과 screencast가 있는 inspector에서 같은 재실행 경로를 사용한다.
     const entrypoint = url.pathname.split('/').pop();
-    if (entrypoint !== 'devtools_app.html' && entrypoint !== 'js_app.html') {
+    if (entrypoint !== 'devtools_app.html' && entrypoint !== 'inspector.html' && entrypoint !== 'js_app.html') {
       return false;
     }
     this.#onTargetRestartStateChanged = options.onTargetRestartStateChanged;

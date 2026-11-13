@@ -120,6 +120,8 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   private checkerboardPattern?: CanvasPattern|null;
   private targetInactive?: boolean;
   private replayInProgress = false;
+  private retainedFrame = false;
+  private frameGeneration = 0;
   private deferredCasting?: number;
   private highlightNode?: SDK.DOMModel.DOMNode|null;
   private config?: Protocol.Overlay.HighlightConfig|null;
@@ -233,6 +235,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   private stopCasting(): void {
+    this.frameGeneration++;
     if (!this.isCasting) {
       return;
     }
@@ -247,7 +250,16 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   private screencastFrame(base64Data: string, metadata: Protocol.Page.ScreencastFrameMetadata): void {
-    this.imageElement.onload = () => {
+    if (this.replayInProgress && this.retainedFrame) {
+      return;
+    }
+    const generation = ++this.frameGeneration;
+    const image = new Image();
+    image.onload = () => {
+      if (generation !== this.frameGeneration) {
+        return;
+      }
+      this.imageElement = image;
       this.pageScaleFactor = metadata.pageScaleFactor;
       this.screenOffsetTop = metadata.offsetTop;
       this.scrollOffsetX = metadata.scrollOffsetX;
@@ -268,10 +280,18 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this.viewportElement.style.width = metadata.deviceWidth * this.screenZoom + bordersSize + 'px';
       this.viewportElement.style.height = metadata.deviceHeight * this.screenZoom + bordersSize + 'px';
 
+      if (this.retainedFrame) {
+        this.retainedFrame = false;
+        this.model = null;
+        this.config = null;
+        this.titleElement.classList.add('hidden');
+        this.repaint();
+        this.element.inert = this.replayInProgress;
+      }
       const data = this.highlightNode ? {node: this.highlightNode, selectorList: undefined} : {clear: true};
       void this.updateHighlightInOverlayAndRepaint(data, this.highlightConfig);
     };
-    this.imageElement.src = 'data:image/jpg;base64,' + base64Data;
+    image.src = 'data:image/jpg;base64,' + base64Data;
   }
 
   private isGlassPaneActive(): boolean {
@@ -284,9 +304,32 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   setReplayInProgress(inProgress: boolean): void {
+    const wasReplaying = this.replayInProgress;
+    if (inProgress && !wasReplaying) {
+      this.frameGeneration++;
+      this.retainedFrame = !this.viewportElement.classList.contains('hidden');
+    }
     this.replayInProgress = inProgress;
-    this.element.inert = inProgress;
+    this.element.inert = inProgress || this.retainedFrame;
     this.updateGlasspane();
+    if (wasReplaying && !inProgress && this.retainedFrame && this.isShowing()) {
+      // 복원 중의 about:blank 프레임 대신 복원 후 화면을 새로 요청한다.
+      this.stopCasting();
+      this.startCasting();
+    }
+  }
+
+  retainFrameFrom(previousView: ScreencastView): void {
+    if (previousView.viewportElement.classList.contains('hidden')) {
+      return;
+    }
+    this.canvasElement.width = previousView.canvasElement.width;
+    this.canvasElement.height = previousView.canvasElement.height;
+    this.context.drawImage(previousView.canvasElement, 0, 0);
+    this.viewportElement.style.cssText = previousView.viewportElement.style.cssText;
+    this.viewportElement.classList.remove('hidden');
+    this.retainedFrame = true;
+    this.element.inert = true;
   }
 
   private onSuspendStateChange(): void {
@@ -467,6 +510,9 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   private repaint(): void {
+    if (this.retainedFrame) {
+      return;
+    }
     const model = this.model;
     const config = this.config;
 

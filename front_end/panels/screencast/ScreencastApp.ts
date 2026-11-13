@@ -74,7 +74,7 @@ export class ScreencastApp implements Common.App.App,
       this.rootSplitWidget.setMainWidget(this.screencastView);
     }
     this.screencastView.initialize();
-    this.screencastView.element.inert = Replay.ReplayController.ReplayController.instance().busy;
+    this.screencastView.setReplayInProgress(Replay.ReplayController.ReplayController.instance().busy);
     this.onScreencastEnabledChanged();
   }
 
@@ -86,7 +86,7 @@ export class ScreencastApp implements Common.App.App,
     this.toggleButton.setEnabled(false);
     if (Replay.ReplayController.ReplayController.instance().busy && this.screencastView) {
       // 프로세스 교체 중에도 마지막 프레임과 분할 폭을 유지하되 종료한 대상에 입력하지 않는다.
-      this.screencastView.element.inert = true;
+      this.screencastView.setReplayInProgress(true);
       return;
     }
     this.clearScreencastView();
@@ -107,9 +107,7 @@ export class ScreencastApp implements Common.App.App,
       this.clearScreencastView();
       return;
     }
-    if (this.screencastView) {
-      this.screencastView.element.inert = busy;
-    }
+    this.screencastView?.setReplayInProgress(busy);
   }
 
   private toggleButtonClicked(): void {

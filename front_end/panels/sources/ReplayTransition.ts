@@ -2,11 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/** 소스 패널의 이전 모습만 유지한다. 복원 작업을 화면 캡처 콜백 안에서 기다리지 않는다. */
+/** 복원 중 입력을 잠그고 Sources 패널의 이전 모습만 유지한다. */
 export async function withReplayTransition(
     panel: HTMLElement, signal: AbortSignal, update: () => Promise<void>): Promise<void> {
   if (!document.startViewTransition || signal.aborted) {
-    await update();
+    const wasInert = panel.inert;
+    panel.inert = true;
+    try {
+      await update();
+    } finally {
+      panel.inert = wasInert;
+    }
     return;
   }
   const originalName = panel.style.viewTransitionName;

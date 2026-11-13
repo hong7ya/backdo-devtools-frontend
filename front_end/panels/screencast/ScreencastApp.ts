@@ -5,6 +5,7 @@
 import * as Common from '../../core/common/common.js';
 import * as i18n from '../../core/i18n/i18n.js';
 import * as SDK from '../../core/sdk/sdk.js';
+import * as Replay from '../../models/replay/replay.js';
 import * as UI from '../../ui/legacy/legacy.js';
 
 import {ScreencastView} from './ScreencastView.js';
@@ -34,6 +35,8 @@ export class ScreencastApp implements Common.App.App,
     this.toggleButton.setEnabled(false);
     this.toggleButton.addEventListener(UI.Toolbar.ToolbarButton.Events.CLICK, this.toggleButtonClicked, this);
     SDK.TargetManager.TargetManager.instance().observeModels(SDK.ScreenCaptureModel.ScreenCaptureModel, this);
+    Replay.ReplayController.ReplayController.instance().addEventListener(
+        Replay.ReplayController.Events.CHANGED, this.onReplayStateChanged, this);
   }
 
   static instance(): ScreencastApp {
@@ -65,11 +68,13 @@ export class ScreencastApp implements Common.App.App,
     }
     this.screenCaptureModel = screenCaptureModel;
     this.toggleButton.setEnabled(true);
+    this.screencastView?.detach();
     this.screencastView = new ScreencastView(screenCaptureModel);
     if (this.rootSplitWidget) {
       this.rootSplitWidget.setMainWidget(this.screencastView);
     }
     this.screencastView.initialize();
+    this.screencastView.element.inert = Replay.ReplayController.ReplayController.instance().busy;
     this.onScreencastEnabledChanged();
   }
 
@@ -79,11 +84,32 @@ export class ScreencastApp implements Common.App.App,
     }
     delete this.screenCaptureModel;
     this.toggleButton.setEnabled(false);
+    if (Replay.ReplayController.ReplayController.instance().busy && this.screencastView) {
+      // 프로세스 교체 중에도 마지막 프레임과 분할 폭을 유지하되 종료한 대상에 입력하지 않는다.
+      this.screencastView.element.inert = true;
+      return;
+    }
+    this.clearScreencastView();
+  }
+
+  private clearScreencastView(): void {
     if (this.screencastView) {
       this.screencastView.detach();
       delete this.screencastView;
     }
     this.onScreencastEnabledChanged();
+  }
+
+  private onReplayStateChanged(): void {
+    const busy = Replay.ReplayController.ReplayController.instance().busy;
+    if (!busy && !this.screenCaptureModel && this.screencastView) {
+      // 새 대상이 만들어지지 못한 경우에는 이전 프레임을 계속 연결된 화면처럼 남기지 않는다.
+      this.clearScreencastView();
+      return;
+    }
+    if (this.screencastView) {
+      this.screencastView.element.inert = busy;
+    }
   }
 
   private toggleButtonClicked(): void {

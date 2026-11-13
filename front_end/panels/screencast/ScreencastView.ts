@@ -119,6 +119,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   private isCasting?: boolean;
   private checkerboardPattern?: CanvasPattern|null;
   private targetInactive?: boolean;
+  private replayInProgress = false;
   private deferredCasting?: number;
   private highlightNode?: SDK.DOMModel.DOMNode|null;
   private config?: Protocol.Overlay.HighlightConfig|null;
@@ -282,6 +283,12 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     this.updateGlasspane();
   }
 
+  setReplayInProgress(inProgress: boolean): void {
+    this.replayInProgress = inProgress;
+    this.element.inert = inProgress;
+    this.updateGlasspane();
+  }
+
   private onSuspendStateChange(): void {
     if (SDK.TargetManager.TargetManager.instance().allTargetsSuspended()) {
       this.stopCasting();
@@ -292,7 +299,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   private updateGlasspane(): void {
-    if (this.targetInactive) {
+    if (this.targetInactive && !this.replayInProgress) {
       this.glassPaneElement.textContent = i18nString(UIStrings.theTabIsInactive);
       this.glassPaneElement.classList.remove('hidden');
     } else if (SDK.TargetManager.TargetManager.instance().allTargetsSuspended()) {

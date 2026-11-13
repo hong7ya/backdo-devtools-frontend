@@ -108,7 +108,7 @@ describeWithMockConnection('PersistenceImpl', () => {
 
   function assertBreakLocationUiSourceCodes(uiSourceCodes: Workspace.UISourceCode.UISourceCode[]) {
     const locations = breakpointManager.allBreakpointLocations();
-    assert.deepEqual(locations.map(loc => loc.uiLocation.uiSourceCode), uiSourceCodes);
+    assert.sameMembers(locations.map(loc => loc.uiLocation.uiSourceCode), uiSourceCodes);
   }
 
   it('moves breakpoint from file system uiSourceCode to the network uiSourceCode when binding is created', async () => {

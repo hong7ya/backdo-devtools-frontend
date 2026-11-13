@@ -784,6 +784,7 @@ describeWithMockConnection('BreakpointManager', () => {
       isLogpoint: false,
       resolvedState: [{
         url: compiledUrl,
+        scriptHash: 'compiled-script-hash',
         lineNumber: compiledLineNumber,
         columnNumber: 0,
         condition: '' as SDK.DebuggerModel.BackendCondition,
@@ -850,6 +851,7 @@ describeWithMockConnection('BreakpointManager', () => {
     assert.lengthOf(setting.get(), 1);
     assert.deepEqual(setting.get()[0].resolvedState, [{
                        url: URL,
+                       scriptHash: script.hash,
                        lineNumber: 0,
                        columnNumber: 15,
                        condition: '' as SDK.DebuggerModel.BackendCondition,
@@ -1634,7 +1636,7 @@ describeWithMockConnection('BreakpointManager', () => {
     // After this, the breakpoint manager should not refer to the file system source code anymore, but
     // the file system breakpoint location should be in the storage.
     assert.isEmpty(breakpointManager.breakpointLocationsForUISourceCode(fileSystemUiSourceCode));
-    assert.lengthOf(breakpointManager.storage.breakpointItems(fileSystemUiSourceCode.url()), 1);
+    assert.lengthOf(breakpointManager.storage.breakpointItems({url: fileSystemUiSourceCode.url()}), 1);
 
     Root.Runtime.experiments.disableForTest(Root.Runtime.ExperimentName.INSTRUMENTATION_BREAKPOINTS);
   });

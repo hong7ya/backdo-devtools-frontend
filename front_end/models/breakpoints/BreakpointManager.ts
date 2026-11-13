@@ -43,6 +43,9 @@ import * as Workspace from '../workspace/workspace.js';
 let breakpointManagerInstance: BreakpointManager;
 const INITIAL_RESTORE_BREAKPOINT_COUNT = 100;
 
+// Anonymous scripts use their content hash; their VM URL is only a display name.
+type BreakpointSource = Pick<BreakpointStorageState, 'url'|'scriptHash'>;
+
 export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventTypes> implements
     SDK.TargetManager.SDKModelObserver<SDK.DebuggerModel.DebuggerModel> {
   readonly storage = new Storage();
@@ -139,14 +142,19 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
       toSourceCode: Workspace.UISourceCode.UISourceCode): Promise<void> {
     const toSourceCodeIsRemoved = toSourceCode.project().uiSourceCodeForURL(toSourceCode.url()) !== toSourceCode ||
         this.#workspace.project(toSourceCode.project().id()) !== toSourceCode.project();
-    const breakpointItems = this.storage.breakpointItems(fromSourceCode.url(), fromSourceCode.contentType().name());
+    const breakpointItems = this.storage.breakpointItems(
+        BreakpointManager.breakpointSource(fromSourceCode), fromSourceCode.contentType().name());
     for (const item of breakpointItems) {
       if (toSourceCodeIsRemoved) {
         // If the target source code has been detached from the workspace, then no breakpoint should refer
         // to that source code. Let us only update the storage, so that the breakpoints appear once
         // the user binds the file system again.
-        this.storage.updateBreakpoint(
-            {...item, url: toSourceCode.url(), resourceTypeName: toSourceCode.contentType().name()});
+        this.storage.updateBreakpoint({
+          ...item,
+          scriptHash: undefined,
+          ...BreakpointManager.breakpointSource(toSourceCode),
+          resourceTypeName: toSourceCode.contentType().name(),
+        });
       } else {
         await this.setBreakpoint(
             toSourceCode, item.lineNumber, item.columnNumber, item.condition, item.enabled, item.isLogpoint,
@@ -161,12 +169,8 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     if (!Root.Runtime.experiments.isEnabled(Root.Runtime.ExperimentName.INSTRUMENTATION_BREAKPOINTS)) {
       return;
     }
-    if (!script.sourceURL) {
-      return;
-    }
-
     const uiSourceCode = await this.getUISourceCodeWithUpdatedBreakpointInfo(script);
-    if (this.#hasBreakpointsForUrl(script.sourceURL)) {
+    if (this.storage.breakpointItems(BreakpointManager.breakpointSource(uiSourceCode)).length) {
       await this.#restoreBreakpointsForUrl(uiSourceCode);
     }
 
@@ -233,8 +237,14 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
   #hasBreakpointsForUrl(url: Platform.DevToolsPath.UrlString): boolean {
     // We intentionally don't specify a resource type here, but just check
     // generally whether there's any breakpoint matching the given `url`.
-    const breakpointItems = this.storage.breakpointItems(url);
+    const breakpointItems = this.storage.breakpointItems({url});
     return breakpointItems.length > 0;
+  }
+
+  static breakpointSource(uiSourceCode: Workspace.UISourceCode.UISourceCode): BreakpointSource {
+    const script = Bindings.DefaultScriptMapping.DefaultScriptMapping.scriptForUISourceCode(uiSourceCode);
+    const url = script?.sourceURL || uiSourceCode.url();
+    return script?.isAnonymousScript() ? {url, scriptHash: script.hash} : {url};
   }
 
   static getScriptForInlineUiSourceCode(uiSourceCode: Workspace.UISourceCode.UISourceCode): SDK.Script.Script|null {
@@ -289,22 +299,10 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
 
   private restoreBreakpoints(uiSourceCode: Workspace.UISourceCode.UISourceCode): void {
     const script = BreakpointManager.getScriptForInlineUiSourceCode(uiSourceCode);
-    const defaultScript = Bindings.DefaultScriptMapping.DefaultScriptMapping.scriptForUISourceCode(uiSourceCode);
-    const url = script?.sourceURL ?? uiSourceCode.url();
-    if (!url) {
-      return;
-    }
-    const contentType = uiSourceCode.contentType();
-
+    const breakpoints = this.storage.breakpointItems(
+        BreakpointManager.breakpointSource(uiSourceCode), uiSourceCode.contentType().name());
     this.storage.mute();
-    const breakpoints = this.storage.breakpointItems(url, contentType.name());
     for (const breakpoint of breakpoints) {
-      const resolvedState = this.#breakpointByStorageId.get(Storage.computeId(breakpoint))?.getLastResolvedState();
-      // 재연결 후 같은 VM 번호가 다른 익명 소스에 쓰여도 기존 중단점의 해시를 덮어쓰지 않는다.
-      if (defaultScript && !defaultScript.sourceURL && resolvedState?.some(position => position.scriptHash) &&
-          !resolvedState.some(position => position.scriptHash === defaultScript.hash)) {
-        continue;
-      }
       const {lineNumber, columnNumber} = breakpoint;
       if (!BreakpointManager.isValidPositionInScript(lineNumber, columnNumber, script)) {
         continue;
@@ -345,7 +343,11 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     // As part of de-duplication, we always only show one uiSourceCode, but we may
     // have several uiSourceCodes that correspond to the same
     // file (but are attached to different targets), so set a breakpoint on all of them.
-    const compatibleUiSourceCodes = this.#workspace.findCompatibleUISourceCodes(uiSourceCode);
+    const source = BreakpointManager.breakpointSource(uiSourceCode);
+    const compatibleUiSourceCodes = source.scriptHash ?
+        this.#workspace.uiSourceCodes().filter(
+            candidate => BreakpointManager.breakpointSource(candidate).scriptHash === source.scriptHash) :
+        this.#workspace.findCompatibleUISourceCodes(uiSourceCode);
 
     let primaryBreakpoint: Breakpoint|undefined;
     for (const compatibleUiSourceCode of compatibleUiSourceCodes) {
@@ -373,9 +375,16 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
   private innerSetBreakpoint(
       uiSourceCode: Workspace.UISourceCode.UISourceCode, lineNumber: number, columnNumber: number|undefined,
       condition: UserCondition, enabled: boolean, isLogpoint: boolean, origin: BreakpointOrigin): Breakpoint {
-    const url = BreakpointManager.getScriptForInlineUiSourceCode(uiSourceCode)?.sourceURL ?? uiSourceCode.url();
     const resourceTypeName = uiSourceCode.contentType().name();
-    const storageState = {url, resourceTypeName, lineNumber, columnNumber, condition, enabled, isLogpoint};
+    const storageState = {
+      ...BreakpointManager.breakpointSource(uiSourceCode),
+      resourceTypeName,
+      lineNumber,
+      columnNumber,
+      condition,
+      enabled,
+      isLogpoint,
+    };
     const storageId = Storage.computeId(storageState);
     let breakpoint = this.#breakpointByStorageId.get(storageId);
     if (breakpoint) {
@@ -542,20 +551,6 @@ export class Breakpoint implements SDK.TargetManager.SDKModelObserver<SDK.Debugg
   #storageState!: BreakpointStorageState;
   #origin: BreakpointOrigin;
   isRemoved = false;
-  /**
-   * Fallback positions in case a target doesn't have a script where this breakpoint would fit.
-   * The `ModelBreakpoint` sends this optimistically to a target in case a matching script is
-   * loaded later.
-   *
-   * Since every `ModelBreakpoint` can read/write this variable, it's slightly arbitrary. In
-   * general `lastResolvedState` contains the state of the last `ModelBreakpoint` that attempted
-   * to update the breakpoint(s) in the backend.
-   *
-   * The state gets populated from the storage if/when we set all breakpoints eagerly
-   * on debugger startup so that the backend sets the breakpoints as soon as possible
-   * (crbug.com/1442232, under a flag).
-   */
-  #lastResolvedState: Breakpoint.State|null = null;
   readonly #modelBreakpoints = new Map<SDK.DebuggerModel.DebuggerModel, ModelBreakpoint>();
 
   constructor(
@@ -569,48 +564,34 @@ export class Breakpoint implements SDK.TargetManager.SDKModelObserver<SDK.Debugg
       // User is setting the breakpoint in an existing source.
       console.assert(primaryUISourceCode.contentType().name() === storageState.resourceTypeName);
       this.addUISourceCode(primaryUISourceCode);
-    } else {
-      // We are setting the breakpoint from storage.
-      this.#setLastResolvedStateFromStorage(storageState);
+    } else if (
+        !storageState.resolvedState && storageState.resourceTypeName === Common.ResourceType.resourceTypes.Script.name()) {
+      // Pre-register stored script locations before their sources are loaded.
+      this.#storageState = {
+        ...storageState,
+        resolvedState: [{
+          url: storageState.scriptHash ? '' as Platform.DevToolsPath.UrlString : storageState.url,
+          scriptHash: storageState.scriptHash ?? '',
+          lineNumber: storageState.lineNumber,
+          columnNumber: storageState.columnNumber,
+          condition: this.backendCondition(),
+        }],
+      };
     }
 
     this.breakpointManager.targetManager.observeModels(SDK.DebuggerModel.DebuggerModel, this);
   }
 
-  #setLastResolvedStateFromStorage(storageState: BreakpointStorageState): void {
-    if (storageState.resolvedState) {
-      this.#lastResolvedState = storageState.resolvedState.map(s => ({...s, scriptHash: ''}));
-    } else if (storageState.resourceTypeName === Common.ResourceType.resourceTypes.Script.name()) {
-      // If we are setting the breakpoint from storage (i.e., primaryUISourceCode is null),
-      // and the location is not source mapped, then set the last known state to
-      // the state from storage so that the breakpoints are pre-set into the backend eagerly.
-      this.#lastResolvedState = [{
-        url: storageState.url,
-        lineNumber: storageState.lineNumber,
-        columnNumber: storageState.columnNumber,
-        scriptHash: '',
-        condition: this.backendCondition(),
-      }];
-    }
-  }
-
   getLastResolvedState(): Breakpoint.State|null {
-    return this.#lastResolvedState;
+    return this.#storageState.resolvedState ?? null;
   }
 
-  updateLastResolvedState(locations: Position[]|null): void {
-    this.#lastResolvedState = locations;
-
-    let locationsOrUndefined: ScriptBreakpointLocation[]|undefined = undefined;
-    if (locations) {
-      locationsOrUndefined = locations.map(
-          p => ({url: p.url, lineNumber: p.lineNumber, columnNumber: p.columnNumber, condition: p.condition}));
-    }
-
-    if (resolvedStateEqual(this.#storageState.resolvedState, locationsOrUndefined)) {
+  updateLastResolvedState(locations: Breakpoint.State|null): void {
+    const resolvedState = locations ?? undefined;
+    if (resolvedStateEqual(this.#storageState.resolvedState, resolvedState)) {
       return;
     }
-    this.#storageState = {...this.#storageState, resolvedState: locationsOrUndefined};
+    this.#storageState = {...this.#storageState, resolvedState};
     this.breakpointManager.storage.updateBreakpoint(this.#storageState);
   }
 
@@ -845,17 +826,15 @@ export class Breakpoint implements SDK.TargetManager.SDKModelObserver<SDK.Debugg
   }
 
   updateState(newState: BreakpointStorageState): void {
-    // Only 'enabled', 'condition' and 'isLogpoint' can change (except during initialization).
-    if (this.#storageState &&
-        (this.#storageState.url !== newState.url || this.#storageState.lineNumber !== newState.lineNumber ||
-         this.#storageState.columnNumber !== newState.columnNumber)) {
+    // The identity is fixed; an anonymous script's display URL may change after reconnecting.
+    if (this.#storageState && Storage.computeId(this.#storageState) !== Storage.computeId(newState)) {
       throw new Error('Invalid breakpoint state update');
     }
     if (this.#storageState?.enabled === newState.enabled && this.#storageState?.condition === newState.condition &&
-        this.#storageState?.isLogpoint === newState.isLogpoint) {
+        this.#storageState?.isLogpoint === newState.isLogpoint && this.#storageState?.url === newState.url) {
       return;
     }
-    this.#storageState = newState;
+    this.#storageState = {...this.#storageState, ...newState};
     this.breakpointManager.storage.updateBreakpoint(this.#storageState);
     void this.updateBreakpoint();
   }
@@ -1009,70 +988,61 @@ export class ModelBreakpoint {
     return false;
   }
 
+  async #breakpointPositions(): Promise<Breakpoint.State|null> {
+    if (this.#breakpoint.getIsRemoved() || !this.#breakpoint.enabled() || this.scriptDiverged()) {
+      return null;
+    }
+    const lineNumber = this.#breakpoint.lineNumber();
+    const columnNumber = this.#breakpoint.columnNumber();
+    const condition = this.#breakpoint.backendCondition();
+    const {scriptHash} = this.#breakpoint.storageState;
+    for (const uiSourceCode of this.#breakpoint.getUiSourceCodes()) {
+      const {lineNumber: uiLineNumber, columnNumber: uiColumnNumber} =
+          BreakpointManager.uiLocationFromBreakpointLocation(uiSourceCode, lineNumber, columnNumber);
+      const locations = await this.#debuggerWorkspaceBinding.uiLocationToRawLocations(
+          uiSourceCode, uiLineNumber, uiColumnNumber);
+      const debuggerLocations = locations.filter(location => location.debuggerModel === this.#debuggerModel);
+      if (debuggerLocations.length && debuggerLocations.every(location => location.script())) {
+        return await Promise.all(debuggerLocations.map(async location => {
+          const script = location.script();
+          assertNotNullOrUndefined(script);
+          return {
+            url: script.sourceURL,
+            scriptHash: script.hash,
+            lineNumber: location.lineNumber,
+            columnNumber: location.columnNumber,
+            condition: await this.#breakpoint.backendCondition(location),
+          };
+        }));
+      }
+    }
+    if (scriptHash) {
+      return [{url: '' as Platform.DevToolsPath.UrlString, scriptHash, lineNumber, columnNumber, condition}];
+    }
+    if (Root.Runtime.experiments.isEnabled(Root.Runtime.ExperimentName.INSTRUMENTATION_BREAKPOINTS)) {
+      return null;
+    }
+    // Pre-register named sources using the last mapped positions, or the original URL.
+    return (this.#breakpoint.getLastResolvedState() ?? [{
+             url: this.#breakpoint.url(),
+             scriptHash: '',
+             lineNumber,
+             columnNumber,
+             condition,
+           }]).map(position => ({...position, condition}));
+  }
+
   async #updateInDebugger(): Promise<DebuggerUpdateResult> {
     if (this.#debuggerModel.target().isDisposed()) {
       this.cleanUpAfterDebuggerIsGone();
       return DebuggerUpdateResult.OK;
     }
     if (SDK.UserBreakpoints.UserBreakpoints.instance().suspended) {
-      // 조건식·로그포인트를 평가하지 않되, UI 설정과 익명 스크립트의 해시는 보존한다.
+      // Suspend backend execution without changing the stored breakpoint.
       await this.resetBreakpoint();
       return DebuggerUpdateResult.OK;
     }
-    const lineNumber = this.#breakpoint.lineNumber();
-    const columnNumber = this.#breakpoint.columnNumber();
-    const condition = this.#breakpoint.backendCondition();
-
-    // Calculate the new state.
-    let newState: Breakpoint.State|null = null;
-    if (!this.#breakpoint.getIsRemoved() && this.#breakpoint.enabled() && !this.scriptDiverged()) {
-      let debuggerLocations: SDK.DebuggerModel.Location[] = [];
-      for (const uiSourceCode of this.#breakpoint.getUiSourceCodes()) {
-        const {lineNumber: uiLineNumber, columnNumber: uiColumnNumber} =
-            BreakpointManager.uiLocationFromBreakpointLocation(uiSourceCode, lineNumber, columnNumber);
-        const locations =
-            await Bindings.DebuggerWorkspaceBinding.DebuggerWorkspaceBinding.instance().uiLocationToRawLocations(
-                uiSourceCode, uiLineNumber, uiColumnNumber);
-        debuggerLocations = locations.filter(location => location.debuggerModel === this.#debuggerModel);
-        if (debuggerLocations.length) {
-          break;
-        }
-      }
-      if (debuggerLocations.length && debuggerLocations.every(loc => loc.script())) {
-        const positions = await Promise.all(debuggerLocations.map(async loc => {
-          const script = loc.script() as SDK.Script.Script;
-          const condition = await this.#breakpoint.backendCondition(loc);
-          return {
-            url: script.sourceURL,
-            scriptHash: script.hash,
-            lineNumber: loc.lineNumber,
-            columnNumber: loc.columnNumber,
-            condition,
-          };
-        }));
-        newState = positions.slice(0);  // Create a copy
-      } else if (!Root.Runtime.experiments.isEnabled(Root.Runtime.ExperimentName.INSTRUMENTATION_BREAKPOINTS)) {
-        // Use this fallback if we do not have instrumentation breakpoints enabled yet. This currently makes
-        // sure that v8 knows about the breakpoint and is able to restore it whenever the script is parsed.
-        const lastResolvedState = this.#breakpoint.getLastResolvedState();
-        if (lastResolvedState) {
-          // Re-use position information from fallback but use up-to-date condition.
-          newState = lastResolvedState.map(position => ({...position, condition}));
-        } else {
-          // TODO(bmeurer): This fallback doesn't make a whole lot of sense, we should
-          // at least signal a warning to the developer that this #breakpoint wasn't
-          // really resolved.
-          const position = {
-            url: this.#breakpoint.url(),
-            scriptHash: '',
-            lineNumber,
-            columnNumber,
-            condition,
-          };
-          newState = [position];
-        }
-      }
-    }
+    const newState = await this.#breakpointPositions();
     const hasBackendState = this.#breakpointIds.length;
 
     // Case 1: Back-end has some breakpoints and the new state is a proper subset
@@ -1241,21 +1211,6 @@ export class ModelBreakpoint {
   }
 }
 
-/**
- * A concrete breakpoint position in a specific target. Each `ModelBreakpoint`
- * consists of multiple of these.
- *
- * Note that a `Position` only denotes where we *want* to set a breakpoint, not
- * where it was actually set by V8 after the fact.
- */
-interface Position {
-  url: Platform.DevToolsPath.UrlString;
-  scriptHash: string;
-  lineNumber: number;
-  columnNumber?: number;
-  condition: SDK.DebuggerModel.BackendCondition;
-}
-
 export const enum BreakpointOrigin {
   USER_ACTION = 'USER_ACTION',
   OTHER = 'RESTORED',
@@ -1263,7 +1218,7 @@ export const enum BreakpointOrigin {
 
 export namespace Breakpoint {
 
-  export type State = Position[];
+  export type State = ScriptBreakpointLocation[];
   export namespace State {
     export function subset(stateA?: State|null, stateB?: State|null): boolean {
       if (stateA === stateB) {
@@ -1299,7 +1254,10 @@ class Storage {
     this.breakpoints = new Map();
     this.#muted = false;
     for (const breakpoint of this.setting.get()) {
-      this.breakpoints.set(Storage.computeId(breakpoint), breakpoint);
+      const id = Storage.computeId(breakpoint);
+      if (id) {
+        this.breakpoints.set(id, breakpoint);
+      }
     }
   }
 
@@ -1311,10 +1269,14 @@ class Storage {
     this.#muted = false;
   }
 
-  breakpointItems(url: Platform.DevToolsPath.UrlString, resourceTypeName?: string): BreakpointStorageState[] {
+  breakpointItems(source: BreakpointSource, resourceTypeName?: string): BreakpointStorageState[] {
+    const sourceId = Storage.sourceId(source);
+    if (!sourceId) {
+      return [];
+    }
     const breakpoints = [];
     for (const breakpoint of this.breakpoints.values()) {
-      if (breakpoint.url !== url) {
+      if (Storage.sourceId(breakpoint) !== sourceId) {
         continue;
       }
       if (breakpoint.resourceTypeName !== resourceTypeName && resourceTypeName !== undefined) {
@@ -1351,11 +1313,20 @@ class Storage {
     this.setting.set(Array.from(this.breakpoints.values()));
   }
 
-  static computeId({url, resourceTypeName, lineNumber, columnNumber}: BreakpointStorageState): string {
-    if (!url) {
+  static sourceId({url, scriptHash}: BreakpointSource): string {
+    if (scriptHash) {
+      return `hash:${scriptHash}`;
+    }
+    return url ? `url:${url}` : '';
+  }
+
+  static computeId(state: BreakpointStorageState): string {
+    const sourceId = Storage.sourceId(state);
+    if (!sourceId) {
       return '';
     }
-    let id = `${url}:${resourceTypeName}:${lineNumber}`;
+    const {resourceTypeName, lineNumber, columnNumber} = state;
+    let id = `${sourceId}:${resourceTypeName}:${lineNumber}`;
     if (columnNumber !== undefined) {
       id += `:${columnNumber}`;
     }
@@ -1374,7 +1345,8 @@ function resolvedStateEqual(
   for (let i = 0; i < lhs.length; i++) {
     const lhsLoc = lhs[i];
     const rhsLoc = rhs[i];
-    if (lhsLoc.url !== rhsLoc.url || lhsLoc.lineNumber !== rhsLoc.lineNumber ||
+    if (lhsLoc.url !== rhsLoc.url || lhsLoc.scriptHash !== rhsLoc.scriptHash ||
+        lhsLoc.lineNumber !== rhsLoc.lineNumber ||
         lhsLoc.columnNumber !== rhsLoc.columnNumber || lhsLoc.condition !== rhsLoc.condition) {
       return false;
     }
@@ -1390,8 +1362,10 @@ export type UserCondition = Platform.Brand.Brand<string, 'UserCondition'>;
 export const EMPTY_BREAKPOINT_CONDITION = '' as UserCondition;
 export const NEVER_PAUSE_HERE_CONDITION = 'false' as UserCondition;
 
+/** A backend breakpoint request, also persisted for sources that have not loaded yet. */
 export interface ScriptBreakpointLocation {
   readonly url: Platform.DevToolsPath.UrlString;
+  readonly scriptHash: string;
   readonly lineNumber: number;
   readonly columnNumber?: number;
   readonly condition: SDK.DebuggerModel.BackendCondition;
@@ -1403,6 +1377,8 @@ export interface ScriptBreakpointLocation {
  */
 export interface BreakpointStorageState {
   readonly url: Platform.DevToolsPath.UrlString;
+  /** Stable identity for anonymous sources. Named sources are identified by URL. */
+  readonly scriptHash?: string;
   readonly resourceTypeName: string;
   readonly lineNumber: number;
   readonly columnNumber?: number;

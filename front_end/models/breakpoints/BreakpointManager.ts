@@ -986,8 +986,8 @@ export class ModelBreakpoint {
     for (const uiSourceCode of this.#breakpoint.getUiSourceCodes()) {
       const {lineNumber: uiLineNumber, columnNumber: uiColumnNumber} =
           BreakpointManager.uiLocationFromBreakpointLocation(uiSourceCode, lineNumber, columnNumber);
-      const locations = await this.#debuggerWorkspaceBinding.uiLocationToRawLocations(
-          uiSourceCode, uiLineNumber, uiColumnNumber);
+      const locations =
+          await this.#debuggerWorkspaceBinding.uiLocationToRawLocations(uiSourceCode, uiLineNumber, uiColumnNumber);
       const debuggerLocations = locations.filter(location => location.debuggerModel === this.#debuggerModel);
       if (debuggerLocations.length && debuggerLocations.every(location => location.script())) {
         return await Promise.all(debuggerLocations.map(async location => {
@@ -1011,12 +1011,13 @@ export class ModelBreakpoint {
     }
     // Pre-register named sources using the last mapped positions, or the original URL.
     return (this.#breakpoint.getLastResolvedState() ?? [{
-             url: this.#breakpoint.url(),
-             scriptHash: '',
-             lineNumber,
-             columnNumber,
-             condition,
-           }]).map(position => ({...position, condition}));
+              url: this.#breakpoint.url(),
+              scriptHash: '',
+              lineNumber,
+              columnNumber,
+              condition,
+            }])
+        .map(position => ({...position, condition}));
   }
 
   async #updateInDebugger(): Promise<DebuggerUpdateResult> {
@@ -1333,8 +1334,8 @@ function resolvedStateEqual(
     const lhsLoc = lhs[i];
     const rhsLoc = rhs[i];
     if (lhsLoc.url !== rhsLoc.url || lhsLoc.scriptHash !== rhsLoc.scriptHash ||
-        lhsLoc.lineNumber !== rhsLoc.lineNumber ||
-        lhsLoc.columnNumber !== rhsLoc.columnNumber || lhsLoc.condition !== rhsLoc.condition) {
+        lhsLoc.lineNumber !== rhsLoc.lineNumber || lhsLoc.columnNumber !== rhsLoc.columnNumber ||
+        lhsLoc.condition !== rhsLoc.condition) {
       return false;
     }
   }

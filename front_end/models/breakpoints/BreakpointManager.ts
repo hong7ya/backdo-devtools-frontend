@@ -289,6 +289,7 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
 
   private restoreBreakpoints(uiSourceCode: Workspace.UISourceCode.UISourceCode): void {
     const script = BreakpointManager.getScriptForInlineUiSourceCode(uiSourceCode);
+    const defaultScript = Bindings.DefaultScriptMapping.DefaultScriptMapping.scriptForUISourceCode(uiSourceCode);
     const url = script?.sourceURL ?? uiSourceCode.url();
     if (!url) {
       return;
@@ -298,6 +299,12 @@ export class BreakpointManager extends Common.ObjectWrapper.ObjectWrapper<EventT
     this.storage.mute();
     const breakpoints = this.storage.breakpointItems(url, contentType.name());
     for (const breakpoint of breakpoints) {
+      const resolvedState = this.#breakpointByStorageId.get(Storage.computeId(breakpoint))?.getLastResolvedState();
+      // 재연결 후 같은 VM 번호가 다른 익명 소스에 쓰여도 기존 중단점의 해시를 덮어쓰지 않는다.
+      if (defaultScript && !defaultScript.sourceURL && resolvedState?.some(position => position.scriptHash) &&
+          !resolvedState.some(position => position.scriptHash === defaultScript.hash)) {
+        continue;
+      }
       const {lineNumber, columnNumber} = breakpoint;
       if (!BreakpointManager.isValidPositionInScript(lineNumber, columnNumber, script)) {
         continue;

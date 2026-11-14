@@ -14,20 +14,7 @@
 
 ## 시연
 
-![반복문에서 이전 위치로 돌아가는 BackDo 시연](https://github.com/user-attachments/assets/7cbbb28e-a626-4951-b8e6-64b76f41bb44)
-
-초기 버전에서 촬영한 시연입니다.
-
-<details>
-<summary>조건문·중첩 함수·콜백 함수 시연 더 보기</summary>
-
-![초기 버전의 조건문 시연](https://github.com/user-attachments/assets/1625cb7e-54c8-42fa-8a66-23c7f6a2f89f)
-
-![초기 버전의 중첩 함수 시연](https://github.com/user-attachments/assets/e1313daa-f32d-497d-9301-d2f1b8dab41a)
-
-![초기 버전의 콜백 함수 시연](https://github.com/user-attachments/assets/4e7cbccb-1847-45dc-82e6-df46b815d95a)
-
-</details>
+https://github.com/user-attachments/assets/34bee6ce-fbe1-4cb5-9aee-0bea6c401575
 
 ## 제작 배경과 주요 기능
 

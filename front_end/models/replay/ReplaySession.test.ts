@@ -73,7 +73,7 @@ describe('재실행 세션', () => {
   it('재실행 경로가 달라지면 실패 이유만 남기고 이력을 해제한다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0));
-    session.recordPause(pause(1));
+    session.recordPause(pause(1, 1, true));
     session.beginReverse();
     assert.throws(() => session.recordPause(pause(9)), /diverged/);
     session.fail(new Error('다른 실행 경로'));
@@ -160,15 +160,51 @@ describe('재실행 세션', () => {
     assert.throws(() => session.takeReplayCommand(2), /실행 경계를 지나쳤습니다/);
   });
 
+  it('첫 위치를 만든 Pause는 그 위치 검증으로 소비하고 이후 명령은 실제 재생한다', () => {
+    const session = new ReplaySession();
+    const initialPause = session.beginExecution('pause');
+    assert.strictEqual(session.recordPause(pause(0)), 'show');
+    const resume = session.beginExecution('resume');
+    session.recordPause(pause(1));
+    session.recordPause(pause(2, 1, true));
+
+    assert.deepEqual(session.beginReverse(), pause(1).position);
+    assert.strictEqual(session.recordPause(pause(0)), 'continue');
+    assert.strictEqual(session.currentCommand, initialPause);
+    assert.strictEqual(session.takeReplayCommand(1), resume);
+    assert.strictEqual(session.recordPause(pause(1)), 'show');
+
+    assert.deepEqual(session.beginReverse(), pause(0).position);
+    assert.strictEqual(session.recordPause(pause(0)), 'show');
+    assert.deepEqual(session.commands, [initialPause]);
+    session.beginExecution('step-over');
+    assert.strictEqual(session.recordPause(pause(1)), 'show');
+    assert.deepEqual(session.beginReverse(), pause(0).position);
+    assert.strictEqual(session.recordPause(pause(0)), 'show');
+  });
+
   it('기록 대상 밖의 정지와 재실행 중에는 뒤로가기를 허용하지 않는다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0));
     session.recordPause(pause(1));
     session.unrecordedPause();
     assert.isFalse(session.canReverse);
-    session.recordPause(pause(2));
+    session.recordPause(pause(2, 1, true));
     session.beginReverse();
     assert.isFalse(session.canReverse);
     assert.throws(() => session.beginExecution('resume'), /in progress/);
+  });
+
+  it('사용자 명령 전의 초기화는 숨겨 기록하고 첫 debugger에서 바로 앞 위치로 돌아간다', () => {
+    const session = new ReplaySession();
+    assert.strictEqual(session.recordPause(pause(0)), 'continue');
+    assert.strictEqual(session.recordPause(pause(1)), 'continue');
+    assert.strictEqual(session.recordPause(pause(2, 1, true)), 'show');
+    assert.isEmpty(session.commands);
+    assert.deepEqual(session.beginReverse(), pause(1).position);
+    assert.strictEqual(session.recordPause(pause(0)), 'continue');
+    assert.strictEqual(session.recordPause(pause(1)), 'show');
+    assert.isNull(session.currentCommand);
+    assert.isTrue(session.canReverse);
   });
 });

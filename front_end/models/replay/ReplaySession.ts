@@ -124,11 +124,13 @@ export class ReplaySession {
       const index = this.#replayPlan.acceptedPositions;
       const expectedCommand = this.#replayPlan.records[index]?.context?.userCommand;
       const complete = this.#replayPlan.accept(pause.position);
-      // 예외 등 별도 정지는 복원 중 해제된다. 그 정지에서 누른 Resume는 JS 상태를
-      // 바꾸지 않는다. 다음 위치가 일치한 경우에만 해당 재개를 소비하고 진행 정책을 잇는다.
+      // 첫 위치를 만든 Pause와 복원 중 생략한 예외 정지의 Resume는 다시 보내지 않는다.
+      // 연결된 위치가 일치한 경우에만 소비한다. Step은 실제 CDP 실행이 필요하다.
       while (expectedCommand && this.#commandCursor <= expectedCommand.sequence) {
         const command = this.#commands[this.#commandCursor];
-        if (command.command !== 'resume' || !command.fromAuxiliaryPause || command.afterPosition !== index) {
+        const initialPause = index === 0 && command.command === 'pause';
+        const auxiliaryResume = command.command === 'resume' && command.fromAuxiliaryPause;
+        if (command.afterPosition !== index || (!initialPause && !auxiliaryResume)) {
           break;
         }
         this.#currentCommand = command;
@@ -149,7 +151,7 @@ export class ReplaySession {
     // Resume는 모든 기록 위치를, Step Out은 빠져나오는 함수의 실행 위치를 되짚는다.
     // Step Over가 건너뛴 함수 내부는 재실행 검증 경로에만 남긴다.
     const command = this.#currentCommand;
-    const reverseTarget = this.#isAtRecordedPause || command?.command === 'resume' ||
+    const reverseTarget = this.#isAtRecordedPause || !command || command.command === 'resume' ||
         (command?.command === 'step-out' && pause.depth <= command.depth);
     this.history.record(pause.position, reverseTarget, {
       depth: pause.depth,
@@ -214,7 +216,8 @@ export class ReplaySession {
     if (pause.userVisible) {
       return true;
     }
-    switch (this.#currentCommand?.command ?? 'step-into') {
+    // 페이지 로드나 Console 실행은 사용자 Step 명령이 없어도 자연스럽게 진행한다.
+    switch (this.#currentCommand?.command ?? 'resume') {
       case 'pause':
       case 'step-into':
         return true;

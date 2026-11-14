@@ -55,32 +55,52 @@ export class ReplayPlan {
 /** 실행 위치를 기록한다. Console 명령 완료는 같은 위치를 한 번 더 남기며 실제 입력은 제어 계층이 재생한다. */
 export class ExecutionHistory {
   #positions: ExecutionPosition[] = [];
+  #reverseTargets: number[] = [];
 
   get length(): number {
     return this.#positions.length;
   }
 
   get canReverse(): boolean {
-    return this.#positions.length > 1;
+    return this.#previousIndex !== undefined;
   }
 
-  record(position: ExecutionPosition): void {
+  get #previousIndex(): number|undefined {
+    const last = this.#reverseTargets.at(-1);
+    return last === this.#positions.length - 1 ? this.#reverseTargets.at(-2) : last;
+  }
+
+  record(position: ExecutionPosition, reverseTarget = true): void {
     if (!position.url || !position.hash || !Number.isInteger(position.lineNumber) || position.lineNumber < 0 ||
         !Number.isInteger(position.columnNumber) || position.columnNumber < 0) {
       throw new Error('Cannot record an unstable or invalid source position');
     }
     this.#positions.push(Object.freeze({...position}));
+    if (reverseTarget) {
+      this.markCurrentAsReverseTarget();
+    }
+  }
+
+  /** 같은 실행 위치에 별도 사용자 정지가 오면 중복 기록 없이 목적지로 남긴다. */
+  markCurrentAsReverseTarget(): void {
+    const index = this.#positions.length - 1;
+    if (index >= 0 && this.#reverseTargets.at(-1) !== index) {
+      this.#reverseTargets.push(index);
+    }
   }
 
   clear(): void {
     this.#positions = [];
+    this.#reverseTargets = [];
   }
 
   previous(): ReplayPlan {
-    if (!this.canReverse) {
+    const index = this.#previousIndex;
+    if (index === undefined) {
       throw new Error('No previous recorded position');
     }
-    return new ReplayPlan(this.#positions.slice(0, -1));
+    // 건너뛴 위치도 재실행 순서 검증에는 필요하므로 목표까지의 원본 경로를 유지한다.
+    return new ReplayPlan(this.#positions.slice(0, index + 1));
   }
 
   commit(plan: ReplayPlan): void {
@@ -89,5 +109,6 @@ export class ExecutionHistory {
     }
     // 복원 후 Resume·Step을 실행하면 복원 지점부터 새로운 실행 이력을 기록한다.
     this.#positions = [...plan.positions];
+    this.#reverseTargets = this.#reverseTargets.filter(index => index < this.#positions.length);
   }
 }

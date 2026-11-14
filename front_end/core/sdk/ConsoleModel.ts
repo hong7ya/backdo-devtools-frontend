@@ -185,21 +185,31 @@ export class ConsoleModel extends SDKModel<EventTypes> {
       useCommandLineAPI,
       userGesture: Common.Settings.Settings.instance().moduleSetting('console-user-activation-eval').get(),
     });
-    const result = await executionContext.evaluate(
-        {
-          expression,
-          objectGroup: 'console',
-          includeCommandLineAPI: useCommandLineAPI,
-          silent: false,
-          returnByValue: false,
-          generatePreview: true,
-          replMode: true,
-          allowUnsafeEvalBlockedByCSP: false,
-        },
-        Common.Settings.Settings.instance().moduleSetting('console-user-activation-eval').get(),
-        /* awaitPromise */ false);
+    const result = await executionContext
+                       .evaluate(
+                           {
+                             expression,
+                             objectGroup: 'console',
+                             includeCommandLineAPI: useCommandLineAPI,
+                             silent: false,
+                             returnByValue: false,
+                             generatePreview: true,
+                             replMode: true,
+                             allowUnsafeEvalBlockedByCSP: false,
+                           },
+                           Common.Settings.Settings.instance().moduleSetting('console-user-activation-eval').get(),
+                           /* awaitPromise */ false)
+                       .catch(error => {
+                         this.dispatchEventToListeners(Events.CommandEvaluationFailed, {
+                           commandMessage: originatingMessage,
+                           error: error instanceof Error ? error.message : String(error),
+                         });
+                         throw error;
+                       });
     Host.userMetrics.actionTaken(Host.UserMetrics.Action.ConsoleEvaluated);
     if ('error' in result) {
+      this.dispatchEventToListeners(
+          Events.CommandEvaluationFailed, {commandMessage: originatingMessage, error: result.error});
       return;
     }
     await Common.Console.Console.instance().showPromise();
@@ -522,6 +532,7 @@ export enum Events {
   MessageAdded = 'MessageAdded',
   MessageUpdated = 'MessageUpdated',
   CommandEvaluated = 'CommandEvaluated',
+  CommandEvaluationFailed = 'CommandEvaluationFailed',
   CommandWillBeEvaluated = 'CommandWillBeEvaluated',
   /* eslint-enable @typescript-eslint/naming-convention */
 }
@@ -545,6 +556,7 @@ export interface EventTypes {
   [Events.MessageAdded]: ConsoleMessage;
   [Events.MessageUpdated]: ConsoleMessage;
   [Events.CommandEvaluated]: CommandEvaluatedEvent;
+  [Events.CommandEvaluationFailed]: {commandMessage: ConsoleMessage, error: string};
   [Events.CommandWillBeEvaluated]: ConsoleCommand;
 }
 

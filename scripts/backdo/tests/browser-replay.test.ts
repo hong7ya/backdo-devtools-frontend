@@ -13,7 +13,7 @@ import {
   removeBreakpointForLine
 } from '../../../test/e2e/helpers/sources-helpers.js';
 
-import {enterConsoleCode, evaluateInConsole} from './BrowserTestActions.js';
+import {enterConsoleCode, readPausedValue} from './BrowserTestActions.js';
 import {BrowserTestEnvironment} from './BrowserTestEnvironment.js';
 
 const RECORDING_METER = 'pierce/[role="meter"][aria-label="CDP 처리 시간 예산 사용률"]';
@@ -68,24 +68,24 @@ sum(3);`,
       await addLineBreakpoint(page, returnPosition);
       await resumeToNextPause(page);
       await assertPausedAt(page, returnPosition);
-      assert.strictEqual(await evaluateInConsole(page, 'total'), '12');
+      assert.strictEqual(await readPausedValue(page, 'total'), 12);
 
       await reverse(page);
 
       await assertPausedAt(page, lastCondition);
-      assert.strictEqual(await evaluateInConsole(page, 'total'), '12');
+      assert.strictEqual(await readPausedValue(page, 'total'), 12);
 
       await stepOver(page);
       await assertPausedAt(page, returnPosition);
       await resumeToNextPause(page);
 
       await assertPausedAt(page, returnPosition);
-      assert.strictEqual(await evaluateInConsole(page, 'total'), '18', '다음 호출의 사용자 중단점에서 멈춘다');
+      assert.strictEqual(await readPausedValue(page, 'total'), 18, '다음 호출의 사용자 중단점에서 멈춘다');
 
       await reverse(page);
 
       await assertPausedAt(page, lastCondition);
-      assert.strictEqual(await evaluateInConsole(page, 'total'), '18', '최근 호출의 직전 상태를 복원한다');
+      assert.strictEqual(await readPausedValue(page, 'total'), 18, '최근 호출의 직전 상태를 복원한다');
     }).timeout(60_000);
   }
 
@@ -210,7 +210,7 @@ runCompletedSource();`,
     await resumeToNextPause(page);
 
     await assertPausedAt(page, returnPosition);
-    assert.strictEqual(await evaluateInConsole(page, 'total'), '12');
+    assert.strictEqual(await readPausedValue(page, 'total'), 12);
   }).timeout(60_000);
 
   it('복원 후 다음 호출에서도 XHR/fetch 요청을 보내기 전에 멈춘다', async () => {
@@ -294,14 +294,14 @@ sum();`,
     await addLineBreakpoint(session.page, returnPosition);
     await resumeToNextPause(session.page);
     await assertPausedAt(session.page, returnPosition);
-    assert.strictEqual(await evaluateInConsole(session.page, 'total'), '18');
+    assert.strictEqual(await readPausedValue(session.page, 'total'), 18);
     await reverse(session.page);
     await assertPausedAt(session.page, positionIn(session.source, 'for (let', '<'));
     assert.notStrictEqual(environment.target.pid, session.initialTarget.pid, 'Console 실행 Chrome을 교체한다');
     assert.notStrictEqual(environment.target.ws, session.initialTarget.ws);
-    assert.strictEqual(await evaluateInConsole(session.page, 'globalThis.seed'), '3');
+    assert.strictEqual(await readPausedValue(session.page, 'globalThis.seed'), 3);
     assert.strictEqual(
-        await evaluateInConsole(session.page, 'total'), '18',
+        await readPausedValue(session.page, 'total'), 18,
         '앞선 두 입력이 누락되거나 순서가 바뀌면 계산 결과가 달라진다');
     assert.deepEqual(session.pageErrors, []);
   }).timeout(60_000);

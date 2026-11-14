@@ -79,6 +79,11 @@ export class ReplaySession {
     return this.#isAtRecordedPause ? 'show' : 'continue';
   }
 
+  /** Console 명령 완료도 같은 실행 위치의 다음 상태다. 호출 깊이는 바뀌지 않는다. */
+  recordConsoleInput(position: ExecutionPosition): void {
+    this.recordPause({position, depth: this.#currentDepth, userVisible: true});
+  }
+
   /** 같은 위치의 추가 사용자 정지는 표시하되 실행 위치를 중복 기록하지 않는다. */
   showUserPause(depth: number, atRecordedPosition: boolean): void {
     this.#currentDepth = depth;

@@ -735,6 +735,7 @@ export class SourcesPanel extends UI.Panel.Panel implements
     const busy = replay.busy || Boolean(this.#reverseTransition);
     this.#replayToolbar?.updateState({
       busy,
+      busyLabel: replay.busyLabel,
       enabled: replay.canReverse(currentDebuggerModel),
       status: replay.status,
       calibrating: replay.calibrating,

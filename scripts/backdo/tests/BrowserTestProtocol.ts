@@ -21,6 +21,7 @@ export interface BrowserTestClient {
   calibrationFinished(): boolean;
   isPaused(): boolean;
   pauseReason(): string|null;
+  readPausedValue(expression: string): Promise<unknown>;
   sourceIsVisible(source: string): boolean;
   snapshot(): ReplaySnapshot;
 }

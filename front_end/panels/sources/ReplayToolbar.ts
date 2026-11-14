@@ -41,17 +41,16 @@ export class ReplayToolbar extends UI.Toolbar.ToolbarItem {
     this.#loadingLabel.textContent = '복원 중';
   }
 
-  updateState({busy, enabled, status, calibrating}:
-                  {busy: boolean, enabled: boolean, status: string, calibrating: boolean}): void {
+  updateState({busy, busyLabel = '복원 중', enabled, status, calibrating}:
+                  {busy: boolean, busyLabel?: string, enabled: boolean, status: string, calibrating: boolean}): void {
     this.element.setAttribute('aria-busy', String(busy || calibrating));
     this.button.setEnabled(enabled && !busy && !calibrating);
     this.element.classList.toggle('backdo-replay-disabled', !this.button.enabled);
     this.#status = status;
-    if (busy || calibrating) {
-      this.#status = calibrating ? '사용자 코드와 분리된 프로그램에서 CDP 요청·응답 시간을 확인하고 있습니다.' :
-                                   '이전 실행 위치로 복원 중입니다.';
+    if (calibrating) {
+      this.#status = '사용자 코드와 분리된 프로그램에서 CDP 요청·응답 시간을 확인하고 있습니다.';
     }
-    this.#loadingLabel.textContent = calibrating ? 'CDP 응답 확인 중' : '복원 중';
+    this.#loadingLabel.textContent = calibrating ? 'CDP 응답 확인 중' : busyLabel;
     this.#updateTooltip();
     this.#loading.hidden = !busy && !calibrating;
   }

@@ -52,7 +52,7 @@ export class ReplayPlan {
   }
 }
 
-/** 실행 위치만 기록한다. 지역 변수, 힙, 클로저, 반환값, 외부 입력은 저장하지 않는다. */
+/** 실행 위치를 기록한다. Console 명령 완료는 같은 위치를 한 번 더 남기며 실제 입력은 제어 계층이 재생한다. */
 export class ExecutionHistory {
   #positions: ExecutionPosition[] = [];
 

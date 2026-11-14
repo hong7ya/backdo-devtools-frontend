@@ -33,7 +33,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const prepared = await createControllerTarget({kind: 'node'});
     const {controller, model, script} = prepared;
     const requestPause = sinon.stub(model.agent, 'invoke_pause').resolves({getError: () => undefined});
-    sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    const requestResume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
     enableReplay(prepared);
 
     model.pause();
@@ -51,8 +51,12 @@ describeWithMockConnection('공통 재실행 제어기', () => {
       await pause(model, script, 0);
       await pause(model, script, 1);
     });
+    requestResume.resetHistory();
 
     await controller.reverse();
+
+    sinon.assert.calledOnce(requestResume);
+    sinon.assert.calledOnce(requestPause);
     assert.isNull(controller.session.error);
     assert.strictEqual(controller.currentPosition?.lineNumber, 1);
     assert.lengthOf(controller.session.history, 2);

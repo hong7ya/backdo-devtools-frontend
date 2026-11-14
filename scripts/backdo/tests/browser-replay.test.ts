@@ -13,7 +13,7 @@ import {
   removeBreakpointForLine
 } from '../../../test/e2e/helpers/sources-helpers.js';
 
-import {enterConsoleCode, readPausedValue} from './BrowserTestActions.js';
+import {enterConsoleCode, evaluateInConsole, readPausedValue} from './BrowserTestActions.js';
 import {BrowserTestEnvironment} from './BrowserTestEnvironment.js';
 
 const RECORDING_METER = 'pierce/[role="meter"][aria-label="CDP 처리 시간 예산 사용률"]';
@@ -101,6 +101,86 @@ sum(3);`,
     await assertPausedAt(page, positionIn(source, 'for (let', '+= 1'));
   }).timeout(60_000);
 
+  it('Node: Step Over·Into·Out의 실행 경계를 여러 번 되돌린다', async () => {
+    const {page, source} = await environment.open({
+      kind: 'node',
+      fixture: 'step-boundaries.js',
+      source: `debugger;
+function add(value) {
+  value += 2;
+  return value;
+}
+const first = add(1);
+const second = add(first);
+debugger;`,
+    });
+    const firstCall = positionIn(source, 'const first', 'add(1)');
+    const secondCall = positionIn(source, 'const second', 'add(first)');
+    const functionEntry = positionIn(source, 'value += 2;');
+    const returnPosition = positionIn(source, 'return value;');
+    const returnEnd = {...returnPosition, columnNumber: returnPosition.columnNumber + 'return value;'.length};
+    await stepOver(page);
+    await assertPausedAt(page, firstCall);
+
+    await stepOver(page);
+    await assertPausedAt(page, secondCall);
+    assert.strictEqual(await readPausedValue(page, 'first'), 3);
+    await reverse(page);
+    await assertPausedAt(page, firstCall);
+
+    await executeToNextPause(page, 'Step into next function call');
+    await assertPausedAt(page, functionEntry);
+    await reverse(page);
+    await assertPausedAt(page, firstCall);
+
+    await executeToNextPause(page, 'Step into next function call');
+    await assertPausedAt(page, functionEntry);
+    await executeToNextPause(page, 'Step out of current function');
+    await assertPausedAt(page, secondCall);
+    await reverse(page);
+    await assertPausedAt(page, returnEnd);
+    assert.strictEqual(await readPausedValue(page, 'value'), 3);
+    await reverse(page);
+    await assertPausedAt(page, functionEntry);
+    assert.strictEqual(await readPausedValue(page, 'value'), 1);
+  }).timeout(60_000);
+
+  for (const kind of ['node', 'console'] as const) {
+    it(`${kind === 'node' ? 'Node' : 'Console'}: 정지 중 Console 수정은 같은 줄에서 되돌리고 후속 실행도 다시 되돌린다`,
+        async () => {
+          const {page, source} = await environment.open({
+            kind,
+            fixture: 'console-edit.js',
+            source: `debugger;
+let value = 1;
+debugger; // 수정 전
+value += 2;
+debugger; // 계산 후`,
+          });
+          const beforeEdit = positionIn(source, 'debugger; // 수정 전', 'debugger;');
+          const increment = positionIn(source, 'value += 2;');
+          const afterIncrement = positionIn(source, 'debugger; // 계산 후', 'debugger;');
+          await resumeToNextPause(page);
+          await assertPausedAt(page, beforeEdit);
+          assert.strictEqual(await readPausedValue(page, 'value'), 1);
+
+          await evaluateInConsole(page, 'value = 10');
+          assert.strictEqual(await readPausedValue(page, 'value'), 10);
+          await reverse(page);
+          await assertPausedAt(page, beforeEdit);
+          assert.strictEqual(await readPausedValue(page, 'value'), 1);
+
+          await stepOver(page);
+          await assertPausedAt(page, increment);
+          await resumeToNextPause(page);
+          await assertPausedAt(page, afterIncrement);
+          assert.strictEqual(await readPausedValue(page, 'value'), 3);
+          await reverse(page);
+          await assertPausedAt(page, increment);
+          assert.strictEqual(await readPausedValue(page, 'value'), 1);
+        }).timeout(60_000);
+  }
+
   it('Console: 반복 방문한 마지막 조건식과 증가식으로 차례로 돌아간다', async () => {
     const {page, source} = await environment.open({kind: 'console', fixture: 'for.js'});
     await addLineBreakpoint(page, positionIn(source, 'return total;'));
@@ -169,9 +249,10 @@ sum(3);`,
     }).timeout(60_000);
   }
 
-  it('실행이 끝난 콘솔 코드의 기록을 다음 입력 뒤에도 유지하고 동적 소스로 돌아간다', async () => {
+  it('debugger로 진입한 동적 소스는 실행이 끝나고 다음 Console 입력 뒤에도 돌아간다', async () => {
     const dynamicSourceURL = 'https://example.test/completed-source.js';
-    const dynamicSource = `Math.abs(-1);
+    const dynamicSource = `debugger;
+Math.abs(-1);
 Math.abs(-2);
 //# sourceURL=${dynamicSourceURL}`;
     const session = await environment.open({
@@ -183,15 +264,28 @@ function runCompletedSource() {
 }
 runCompletedSource();`,
     });
+    const lastCall = positionIn(session.source, 'runCompletedSource();');
+    const evaluationEnd = {...lastCall, columnNumber: lastCall.columnNumber + 'runCompletedSource();'.length};
     const functionEnd = positionIn(session.source, '}');
+    const dynamicEnd = {
+      ...positionIn(dynamicSource, '//# sourceURL='),
+      columnNumber: '//# sourceURL='.length + dynamicSourceURL.length,
+      url: dynamicSourceURL,
+    };
     const lastEvaluatedCall = {...positionIn(dynamicSource, 'Math.abs(-2);', 'abs'), url: dynamicSourceURL};
+    await resumeToNextPause(session.page);
+    await assertPausedAt(session.page, {...positionIn(dynamicSource, 'debugger;'), url: dynamicSourceURL});
     await clickExecutionButton(session.page, 'Resume script execution');
     await session.page.waitForSelector('pierce/.console-user-command-result', {visible: true});
 
     await enterConsoleCode(session.page, 'debugger;');
     await session.page.waitForFunction(() => window.backdoTest.isPaused());
     await reverse(session.page);
+    await assertPausedAt(session.page, evaluationEnd);
+    await reverse(session.page);
     await assertPausedAt(session.page, functionEnd);
+    await reverse(session.page);
+    await assertPausedAt(session.page, dynamicEnd);
     await reverse(session.page);
     await assertPausedAt(session.page, lastEvaluatedCall);
     assert.deepEqual(session.pageErrors, []);

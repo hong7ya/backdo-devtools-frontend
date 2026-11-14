@@ -501,14 +501,16 @@ describeWithMockConnection('디버거의 기록용 정지 처리', () => {
     const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
     const backend = new MockProtocolBackend();
     const script = await backend.addScript(target, {url: 'http://localhost/main.js', content: 'let value = 1;'}, null);
-    const frame = new SDK.DebuggerModel.CallFrame(model, script, {
-      callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
-      functionName: 'main',
-      url: script.sourceURL,
-      location: {scriptId: script.scriptId, lineNumber: 0, columnNumber: 0},
-      scopeChain: [],
-      this: {type: Protocol.Runtime.RemoteObjectType.Undefined},
-    }, 0);
+    const frame = new SDK.DebuggerModel.CallFrame(
+        model, script, {
+          callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
+          functionName: 'main',
+          url: script.sourceURL,
+          location: {scriptId: script.scriptId, lineNumber: 0, columnNumber: 0},
+          scopeChain: [],
+          this: {type: Protocol.Runtime.RemoteObjectType.Undefined},
+        },
+        0);
     const ranges = Promise.withResolvers<SDK.DebuggerModel.LocationRange[]>();
     model.setComputeAutoStepRangesCallback(() => ranges.promise);
     const observe = sinon.spy();

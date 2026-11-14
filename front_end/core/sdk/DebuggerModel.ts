@@ -543,8 +543,8 @@ export class DebuggerModel extends SDKModel<EventTypes> {
 
   /** 이미 처리한 실행 명령을 보낸다. 사용자 명령 가로채기는 계속 유지한다. */
   async executeCommand(
-      command: Exclude<ExecutionCommand, 'skip-pauses'>, callFrame?: CallFrame, origin: 'user'|'internal' = 'internal'):
-      Promise<Protocol.ProtocolResponseWithError> {
+      command: Exclude<ExecutionCommand, 'skip-pauses'>, callFrame?: CallFrame,
+      origin: 'user'|'internal' = 'internal'): Promise<Protocol.ProtocolResponseWithError> {
     switch (command) {
       case 'step-into': {
         const skipList = await this.computeAutoStepSkipList(StepMode.STEP_INTO, callFrame);
@@ -795,8 +795,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     }
 
     if (!await this.setDebuggerPausedDetails(pausedDetails)) {
-      void this.executeCommand(
-          this.#autoSteppingContext ? 'step-over' : 'step-into', pausedDetails.callFrames[0]);
+      void this.executeCommand(this.#autoSteppingContext ? 'step-over' : 'step-into', pausedDetails.callFrames[0]);
     } else {
       Common.EventTarget.fireEvent('DevTools.DebuggerPaused');
     }

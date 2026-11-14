@@ -117,7 +117,9 @@ export class ExecutionHistory {
       throw new Error('Cannot record an unstable or invalid source position');
     }
     this.#records.push(Object.freeze({
-      position: Object.freeze({...position}), reverseTarget, context: context && Object.freeze({...context}),
+      position: Object.freeze({...position}),
+      reverseTarget,
+      context: context && Object.freeze({...context}),
     }));
     if (reverseTarget) {
       this.#reverseTargets.push(this.#records.length - 1);

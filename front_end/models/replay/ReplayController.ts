@@ -156,7 +156,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get busyLabel(): string {
-    return this.#preparingExecution ? '실행 준비 중' : this.#pendingConsoleInputs.length ? 'Console 실행 중' : '복원 중';
+    return this.#preparingExecution       ? '실행 준비 중' :
+        this.#pendingConsoleInputs.length ? 'Console 실행 중' :
+                                            '복원 중';
   }
 
   get currentPosition(): ExecutionPosition|null {
@@ -1134,7 +1136,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.#selectedSources.add(source);
     }
     if (!this.#isReplaying) {
-      this.#scopeChanges.push({afterPosition: this.session.history.length, sources: added, entry, inputCount, beforeScript});
+      this.#scopeChanges.push(
+          {afterPosition: this.session.history.length, sources: added, entry, inputCount, beforeScript});
     }
   }
 
@@ -1266,8 +1269,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         if (epoch !== this.#documentEpoch || script.debuggerModel !== this.#debuggerModel) {
           return;
         }
-        const sources = locations.filter(location => location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement)
-                            .map(location => scope.sourceAt(location));
+        const sources =
+            locations.filter(location => location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement)
+                .map(location => scope.sourceAt(location));
         this.#selectSources(sources, undefined, this.#inputs.length, beforeScript);
       }
       await this.#recordedScript(script, locations);
@@ -1457,7 +1461,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
             }
             const removed = pending.breakpointId ? await modelAtPause.agent.invoke_removeBreakpoint({
               breakpointId: pending.breakpointId as Protocol.Debugger.BreakpointId,
-            }) : undefined;
+            }) :
+                                                   undefined;
             if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel ||
                 !this.#replayActive(generation)) {
               return true;
@@ -1477,7 +1482,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
           const entry = this.session.history.length ? {
             position,
             step: nativeStep,
-          } : undefined;
+          } :
+                                                      undefined;
           this.#selectSources([scope.sourceAt(location)], entry, inputCountAtPause);
         }
       }
@@ -1535,7 +1541,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         position,
         depth: details.callFrames.length,
         reason: details.reason,
-        userVisible: Boolean(initial) || Boolean(this.#pendingStep && this.#reachedStepDestination(details.callFrames.length)) ||
+        userVisible: Boolean(initial) ||
+            Boolean(this.#pendingStep && this.#reachedStepDestination(details.callFrames.length)) ||
             script.debuggerStatements.has(key) || !this.#isRecordingPause(details),
       });
       if (this.#pendingStep && this.#pendingStep.sequence !== this.session.currentCommand?.sequence) {
@@ -1702,7 +1709,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (execution) {
         const {command} = execution;
         this.#pendingStep = command === 'step-into' || command === 'step-over' || command === 'step-out' ?
-            {...execution, command, functionId: this.#currentFunctionId()} : null;
+            {...execution, command, functionId: this.#currentFunctionId()} :
+            null;
         if (command === 'pause') {
           // 원본은 실행 중 Pause 요청이다. 재생은 이미 기록용 중단점에 멈췄으므로
           // 의도만 복원하고 내부 재개로 다음 저장 위치까지 진행한다.

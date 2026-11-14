@@ -495,4 +495,78 @@ describeWithMockConnection('디버거의 기록용 정지 처리', () => {
     model.resume();
     sinon.assert.calledOnce(resume);
   });
+
+  it('소스맵 계산 후 실제 전송한 명령과 사용자·내부 실행을 구분해 알린다', async () => {
+    const target = createTarget();
+    const model = target.model(SDK.DebuggerModel.DebuggerModel)!;
+    const backend = new MockProtocolBackend();
+    const script = await backend.addScript(target, {url: 'http://localhost/main.js', content: 'let value = 1;'}, null);
+    const frame = new SDK.DebuggerModel.CallFrame(model, script, {
+      callFrameId: 'frame' as Protocol.Debugger.CallFrameId,
+      functionName: 'main',
+      url: script.sourceURL,
+      location: {scriptId: script.scriptId, lineNumber: 0, columnNumber: 0},
+      scopeChain: [],
+      this: {type: Protocol.Runtime.RemoteObjectType.Undefined},
+    }, 0);
+    const ranges = Promise.withResolvers<SDK.DebuggerModel.LocationRange[]>();
+    model.setComputeAutoStepRangesCallback(() => ranges.promise);
+    const observe = sinon.spy();
+    model.setExecutionObserver(observe);
+    const response = {getError: () => undefined};
+    const stepOver = sinon.stub(model.agent, 'invoke_stepOver').resolves(response);
+    const stepOut = sinon.stub(model.agent, 'invoke_stepOut').resolves(response);
+    const execution = model.executeCommand('step-out', frame);
+    sinon.assert.notCalled(observe);
+    sinon.assert.notCalled(stepOver);
+    ranges.resolve([{
+      start: new SDK.DebuggerModel.Location(model, script.scriptId, 0, 0),
+      end: new SDK.DebuggerModel.Location(model, script.scriptId, 0, 5),
+    }]);
+    await execution;
+    sinon.assert.calledOnceWithExactly(observe, 'step-over', 'internal');
+    sinon.assert.calledOnce(stepOver);
+    sinon.assert.callOrder(observe, stepOver);
+    sinon.assert.notCalled(stepOut);
+
+    model.setComputeAutoStepRangesCallback(null);
+    await model.stepOver(frame);
+    sinon.assert.calledWithExactly(observe, 'step-over', 'user');
+    const sent = Promise.withResolvers<void>();
+    const stepInto = sinon.stub(model.agent, 'invoke_stepInto').callsFake(() => {
+      sent.resolve();
+      return Promise.resolve(response);
+    });
+    const intercept = sinon.stub().returns(false);
+    model.setExecutionInterceptor(intercept);
+    model.scheduleStepIntoAsync();
+    await sent.promise;
+    sinon.assert.calledOnceWithExactly(intercept, 'step-into');
+    sinon.assert.calledOnceWithExactly(stepInto, {breakOnAsyncCall: true, skipList: []});
+    sinon.assert.calledWithExactly(observe, 'step-into', 'user');
+  });
+
+  it('내부 실행 응답을 기다리는 동안에도 다음 사용자 명령을 가로챈다', async () => {
+    const model = createTarget().model(SDK.DebuggerModel.DebuggerModel)!;
+    const sent = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Protocol.ProtocolResponseWithError>();
+    sinon.stub(model.agent, 'invoke_stepInto').callsFake(() => {
+      sent.resolve();
+      return response.promise;
+    });
+    const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    const intercept = sinon.stub().returns(true);
+    const observe = sinon.spy();
+    model.setExecutionInterceptor(intercept);
+    model.setExecutionObserver(observe);
+    const execution = model.executeCommand('step-into');
+    await sent.promise;
+    model.resume();
+    sinon.assert.calledOnceWithExactly(intercept, 'resume');
+    sinon.assert.notCalled(resume);
+    sinon.assert.calledOnceWithExactly(observe, 'step-into', 'internal');
+    const failure = {getError: () => 'not paused'};
+    response.resolve(failure);
+    assert.strictEqual(await execution, failure);
+  });
 });

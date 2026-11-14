@@ -83,6 +83,83 @@ describe('재실행 세션', () => {
     assert.throws(() => session.beginExecution('resume'), /다른 실행 경로/);
   });
 
+  it('내부 재개를 사용자 명령과 구분하고 각 기록 위치에 원래 명령을 연결한다', () => {
+    const session = new ReplaySession();
+    session.recordPause(pause(0, 2));
+    const step = session.beginExecution('step-over');
+    session.recordDispatch('step-over', 'user');
+    session.recordPause(pause(1, 3));
+    session.recordDispatch('step-out', 'internal');
+    session.recordPause(pause(2, 2));
+    const resume = session.beginExecution('resume');
+    session.recordDispatch('resume', 'user');
+    session.recordPause(pause(3, 2));
+    session.recordDispatch('resume', 'internal');
+    session.recordPause(pause(4, 2, true));
+
+    assert.deepEqual(session.commands, [step, resume]);
+    const records = session.history.records;
+    assert.strictEqual(records[1].context?.dispatch?.origin, 'user');
+    assert.strictEqual(records[2].context?.userCommand, step);
+    assert.strictEqual(records[2].context?.dispatch?.command, 'step-out');
+    assert.strictEqual(records[2].context?.dispatch?.origin, 'internal');
+    assert.strictEqual(records[4].context?.dispatch?.userCommand, resume);
+    assert.deepEqual(session.beginReverse(), pause(3, 2).position);
+  });
+
+  it('복원 시 명령을 경계 순서대로 재생하고 버린 미래 명령은 새 분기에 남기지 않는다', () => {
+    const session = new ReplaySession();
+    session.recordPause(pause(0));
+    const resume = session.beginExecution('resume');
+    session.recordPause(pause(1));
+    session.recordPause(pause(2, 1, true));
+    session.beginExecution('step-over');
+    session.recordPause(pause(3));
+    session.beginReverse();
+    assert.isNull(session.takeReplayCommand(0));
+    session.recordPause(pause(0));
+    assert.strictEqual(session.takeReplayCommand(1), resume);
+    assert.isNull(session.takeReplayCommand(1));
+    session.recordPause(pause(1));
+    assert.strictEqual(session.recordPause(pause(2)), 'show');
+    assert.deepEqual(session.commands, [resume]);
+    assert.strictEqual(session.currentCommand, resume);
+    const stepInto = session.beginExecution('step-into');
+    assert.strictEqual(stepInto.sequence, 1);
+    assert.strictEqual(stepInto.afterPosition, 3);
+  });
+
+  it('같은 위치의 예외 정지에서 누른 Resume는 다음 위치 검증 후 이어받는다', () => {
+    const session = new ReplaySession();
+    session.recordPause(pause(0));
+    const step = session.beginExecution('step-over');
+    session.showUserPause(1, true);
+    const resume = session.beginExecution('resume');
+    session.recordPause(pause(1));
+    session.recordPause(pause(2, 1, true));
+    session.beginReverse();
+    session.recordPause(pause(0));
+    assert.strictEqual(session.takeReplayCommand(1), step);
+    assert.strictEqual(session.currentCommand, step);
+    assert.strictEqual(session.recordPause(pause(1)), 'show');
+    assert.strictEqual(session.currentCommand, resume);
+    assert.deepEqual(session.commands, [step, resume]);
+  });
+
+  it('재생 중 실행 경계를 지난 Step은 마지막 명령으로 대체하지 않고 실패한다', () => {
+    const session = new ReplaySession();
+    session.recordPause(pause(0));
+    session.beginExecution('step-over');
+    session.recordPause(pause(1));
+    session.beginExecution('resume');
+    session.recordPause(pause(2));
+    session.recordPause(pause(3, 1, true));
+    session.beginReverse();
+    session.recordPause(pause(0));
+    session.recordPause(pause(1));
+    assert.throws(() => session.takeReplayCommand(2), /실행 경계를 지나쳤습니다/);
+  });
+
   it('기록 대상 밖의 정지와 재실행 중에는 뒤로가기를 허용하지 않는다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0));

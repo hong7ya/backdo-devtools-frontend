@@ -168,6 +168,8 @@ export type ExecutionCommand = 'resume'|'step-into'|'step-over'|'step-out'|'paus
 export class DebuggerModel extends SDKModel<EventTypes> {
   #pauseInterceptor: ((details: DebuggerPausedDetails) => Promise<boolean>)|null = null;
   #executionInterceptor: ((command: ExecutionCommand) => boolean)|null = null;
+  #executionObserver:
+      ((command: Exclude<ExecutionCommand, 'skip-pauses'>, origin: 'user'|'internal') => void)|null = null;
   #scriptExecutionPreparation: ((script: Script) => Promise<void>)|null = null;
   #internalPause = false;
 
@@ -178,6 +180,11 @@ export class DebuggerModel extends SDKModel<EventTypes> {
 
   setExecutionInterceptor(interceptor: ((command: ExecutionCommand) => boolean)|null): void {
     this.#executionInterceptor = interceptor;
+  }
+
+  setExecutionObserver(
+      observer: ((command: Exclude<ExecutionCommand, 'skip-pauses'>, origin: 'user'|'internal') => void)|null): void {
+    this.#executionObserver = observer;
   }
 
   setScriptExecutionPreparation(prepare: ((script: Script) => Promise<void>)|null): void {
@@ -493,30 +500,21 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     if (this.#executionInterceptor?.('step-into')) {
       return;
     }
-    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_INTO, callFrame);
-    void this.agent.invoke_stepInto({breakOnAsyncCall: false, skipList});
+    await this.executeCommand('step-into', callFrame, 'user');
   }
 
   async stepOver(callFrame?: CallFrame): Promise<void> {
     if (this.#executionInterceptor?.('step-over')) {
       return;
     }
-    this.#autoSteppingContext =
-        (callFrame ?? this.#debuggerPausedDetailsInternal?.callFrames[0])?.functionLocation() ?? null;
-    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OVER, callFrame);
-    void this.agent.invoke_stepOver({skipList});
+    await this.executeCommand('step-over', callFrame, 'user');
   }
 
   async stepOut(callFrame?: CallFrame): Promise<void> {
     if (this.#executionInterceptor?.('step-out')) {
       return;
     }
-    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OUT, callFrame);
-    if (skipList.length !== 0) {
-      void this.agent.invoke_stepOver({skipList});
-    } else {
-      void this.agent.invoke_stepOut();
-    }
+    await this.executeCommand('step-out', callFrame, 'user');
   }
 
   scheduleStepIntoAsync(): void {
@@ -524,6 +522,7 @@ export class DebuggerModel extends SDKModel<EventTypes> {
       return;
     }
     void this.computeAutoStepSkipList(StepMode.STEP_INTO).then(skipList => {
+      this.#executionObserver?.('step-into', 'user');
       void this.agent.invoke_stepInto({breakOnAsyncCall: true, skipList});
     });
   }
@@ -532,17 +531,52 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     if (this.#executionInterceptor?.('resume')) {
       return;
     }
-    void this.agent.invoke_resume({terminateOnResume: false});
-    this.#isPausingInternal = false;
+    void this.executeCommand('resume', undefined, 'user');
   }
 
   pause(): void {
     if (this.#executionInterceptor?.('pause')) {
       return;
     }
-    this.#isPausingInternal = true;
-    this.skipAllPauses(false);
-    void this.agent.invoke_pause();
+    void this.executeCommand('pause', undefined, 'user');
+  }
+
+  /** 이미 처리한 실행 명령을 보낸다. 사용자 명령 가로채기는 계속 유지한다. */
+  async executeCommand(
+      command: Exclude<ExecutionCommand, 'skip-pauses'>, callFrame?: CallFrame, origin: 'user'|'internal' = 'internal'):
+      Promise<Protocol.ProtocolResponseWithError> {
+    switch (command) {
+      case 'step-into': {
+        const skipList = await this.computeAutoStepSkipList(StepMode.STEP_INTO, callFrame);
+        this.#executionObserver?.('step-into', origin);
+        return this.agent.invoke_stepInto({breakOnAsyncCall: false, skipList});
+      }
+      case 'step-over': {
+        this.#autoSteppingContext =
+            (callFrame ?? this.#debuggerPausedDetailsInternal?.callFrames[0])?.functionLocation() ?? null;
+        const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OVER, callFrame);
+        this.#executionObserver?.('step-over', origin);
+        return this.agent.invoke_stepOver({skipList});
+      }
+      case 'step-out': {
+        const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OUT, callFrame);
+        if (skipList.length) {
+          this.#executionObserver?.('step-over', origin);
+          return this.agent.invoke_stepOver({skipList});
+        }
+        this.#executionObserver?.('step-out', origin);
+        return this.agent.invoke_stepOut();
+      }
+      case 'resume':
+        this.#isPausingInternal = false;
+        this.#executionObserver?.('resume', origin);
+        return this.agent.invoke_resume({terminateOnResume: false});
+      case 'pause':
+        this.#isPausingInternal = true;
+        this.skipAllPauses(false);
+        this.#executionObserver?.('pause', origin);
+        return this.agent.invoke_pause();
+    }
   }
 
   async setBreakpointByURL(
@@ -728,15 +762,11 @@ export class DebuggerModel extends SDKModel<EventTypes> {
       if (this.#synchronizeBreakpointsCallback && script) {
         await this.#synchronizeBreakpointsCallback(script);
       }
-      if (this.#scriptExecutionPreparation) {
-        if (script) {
-          await this.#scriptExecutionPreparation(script);
-        }
-        // 파일 준비를 위한 내부 정지는 사용자가 선택한 Step·Resume을 변경하지 않는다.
-        await this.agent.invoke_resume({terminateOnResume: false});
-        return;
+      if (this.#scriptExecutionPreparation && script) {
+        await this.#scriptExecutionPreparation(script);
       }
-      this.resume();
+      // 파일 준비를 위한 내부 정지는 사용자가 선택한 Step·Resume을 변경하지 않는다.
+      await this.executeCommand('resume');
       return;
     }
 
@@ -765,11 +795,8 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     }
 
     if (!await this.setDebuggerPausedDetails(pausedDetails)) {
-      if (this.#autoSteppingContext) {
-        void this.stepOver();
-      } else {
-        void this.stepInto();
-      }
+      void this.executeCommand(
+          this.#autoSteppingContext ? 'step-over' : 'step-into', pausedDetails.callFrames[0]);
     } else {
       Common.EventTarget.fireEvent('DevTools.DebuggerPaused');
     }

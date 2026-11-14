@@ -6,7 +6,13 @@ import * as Common from '../../core/common/common.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
 
-import {type ExecutionPosition, samePosition} from './ExecutionHistory.js';
+import {
+  type ExecutionCommand,
+  type ExecutionDispatch,
+  type ExecutionPosition,
+  type RecordedCommand,
+  samePosition,
+} from './ExecutionHistory.js';
 import {ScriptScope} from './RecordingScope.js';
 import {REPLAY_RESPONSE_BUDGET_MS, REPLAY_TIME_LIMIT_MESSAGE} from './ReplayLimits.js';
 import {ReplaySession} from './ReplaySession.js';
@@ -48,12 +54,6 @@ interface ScopeChange {
 }
 
 type StepCommand = 'step-into'|'step-over'|'step-out';
-
-interface RecordedStep {
-  afterPosition: number;
-  command: StepCommand;
-  depth: number;
-}
 
 export type BrowserInput = {
   type: 'mouse',
@@ -102,8 +102,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #scopeEntry: {change: ScopeChange, breakpointId?: string}|null = null;
   #scriptScopes = new Map<string, ScriptScope>();
   #preparedScopeSizes = new Map<string, number>();
-  #steps: RecordedStep[] = [];
-  #pendingStep: (RecordedStep&{functionId?: string})|null = null;
+  #pendingStep: (RecordedCommand&{command: StepCommand, functionId?: string})|null = null;
   #pausedDetails: SDK.DebuggerModel.DebuggerPausedDetails|undefined;
   #pendingConsoleInputs: Array<RecordedInput&ConsoleInput> = [];
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
@@ -138,6 +137,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #progressListeners = new Set<() => void>();
   #lastPosition: ExecutionPosition|null = null;
   #isReplaying = false;
+  #preparingExecution = false;
   #calibrationHandler: ((signal: AbortSignal) => Promise<number>)|null = null;
   #calibrationAbort: AbortController|null = null;
   #resolveReplay: (() => void)|null = null;
@@ -150,11 +150,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get busy(): boolean {
-    return this.#isReplaying || this.#pendingConsoleInputs.length > 0;
+    return this.#isReplaying || this.#preparingExecution || this.#pendingConsoleInputs.length > 0;
   }
 
   get busyLabel(): string {
-    return this.#pendingConsoleInputs.length ? 'Console 실행 중' : '복원 중';
+    return this.#preparingExecution ? '실행 준비 중' : this.#pendingConsoleInputs.length ? 'Console 실행 중' : '복원 중';
   }
 
   get currentPosition(): ExecutionPosition|null {
@@ -269,6 +269,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     Common.EventTarget.removeEventListeners(this.#listeners);
     this.#debuggerModel?.setPauseInterceptor(null);
     this.#debuggerModel?.setExecutionInterceptor(null);
+    this.#debuggerModel?.setExecutionObserver(null);
     this.#debuggerModel?.setScriptExecutionPreparation(null);
   }
 
@@ -290,6 +291,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#debuggerModel?.setScriptExecutionPreparation(null);
     this.#debuggerModel?.setPauseInterceptor(null);
     this.#debuggerModel?.setExecutionInterceptor(null);
+    this.#debuggerModel?.setExecutionObserver(null);
     this.#documentEpoch++;
     this.#debuggerModel = model;
     this.#pausedDetails = undefined;
@@ -453,6 +455,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.session.fail(error);
     this.#rejectReplay?.(new Error(this.session.error ?? '재실행 실패'));
     this.#debuggerModel?.setExecutionInterceptor(null);
+    this.#debuggerModel?.setExecutionObserver(null);
     this.#debuggerModel?.setPauseInterceptor(null);
     this.#debuggerModel?.setScriptExecutionPreparation(null);
     this.#releaseRecording();
@@ -579,6 +582,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #installInterceptors(model: SDK.DebuggerModel.DebuggerModel): void {
     model.setPauseInterceptor(details => this.#handlePause(details));
     model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
+    model.setExecutionObserver((command, origin) => {
+      this.session.recordDispatch(command, origin);
+      if (origin === 'user' && this.#preparingExecution) {
+        this.#preparingExecution = false;
+        this.#notifyStatusChanged();
+      }
+    });
     model.setScriptExecutionPreparation(script => this.#prepareScriptExecution(script));
   }
 
@@ -1034,8 +1044,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#completedInputs = new Set([...this.#completedInputs].filter(index => index < this.#inputs.length));
     this.#inputCompletions = new Set([...this.#inputCompletions].filter(index => index < this.#inputs.length));
     this.#releaseHeldInputsOnExecution = true;
-    // 복원 지점 뒤의 Step과 범위 확장은 새 실행 분기에 이어 붙이지 않는다.
-    this.#steps = this.#steps.filter(step => step.afterPosition < this.session.history.length);
+    // 명령 분기는 세션에서, 입력과 범위 확장은 제어 계층에서 정리한다.
     this.#scopeChanges = this.#scopeChanges.filter(change => change.afterPosition < this.session.history.length);
     this.#pendingStep = null;
   }
@@ -1480,9 +1489,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const disposition = this.session.recordPause({
         position,
         depth: details.callFrames.length,
+        reason: details.reason,
         userVisible: Boolean(initial) || Boolean(this.#pendingStep && this.#reachedStepDestination(details.callFrames.length)) ||
             script.debuggerStatements.has(key) || !this.#isRecordingPause(details),
       });
+      if (this.#pendingStep && this.#pendingStep.sequence !== this.session.currentCommand?.sequence) {
+        this.#pendingStep = null;
+      }
       this.#lastPosition = position;
       if (!this.#isReplaying) {
         // pause 준비를 기다리는 동안 들어온 release도 현재 정지에 연결한다.
@@ -1571,16 +1584,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (command !== 'pause') {
       this.#releaseHeldInputs();
     }
-    this.session.beginExecution(command);
+    const execution = this.session.beginExecution(command);
+    // 범위와 소스맵을 준비하는 동안 다음 명령이 이 명령의 소유자를 바꾸지 못하게 한다.
+    // 실제 CDP 전송 직후 다시 허용하며, 응답 완료까지 사용자를 기다리게 하지는 않는다.
+    this.#preparingExecution = true;
     this.#pendingStep = null;
     if (command === 'step-into' || command === 'step-over' || command === 'step-out') {
-      const step = {
-        afterPosition: this.session.history.length,
-        command,
-        depth: this.#pausedDetails?.callFrames.length ?? 0,
-      };
-      this.#steps.push(step);
-      this.#pendingStep = {...step, functionId: this.#currentFunctionId()};
+      this.#pendingStep = {...execution, command, functionId: this.#currentFunctionId()};
     }
     this.#notifyStatusChanged();
     // 중단점을 추가한 뒤 실행하는 경우도 이 정지 경계부터 범위에 포함한다.
@@ -1592,7 +1602,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         await this.#prepareRecordingScripts(true);
       }
       if (generation === this.#replayGeneration && !this.session.error) {
-        await this.#sendExecution(command);
+        await this.#sendExecution(command, 'user');
       }
     })().catch(error => {
       if (generation === this.#replayGeneration) {
@@ -1602,36 +1612,21 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     return true;
   }
 
-  async #sendExecution(command: SDK.DebuggerModel.ExecutionCommand): Promise<void> {
+  async #sendExecution(command: ExecutionCommand, origin: ExecutionDispatch['origin'] = 'internal'): Promise<void> {
     const model = this.#debuggerModel;
     if (!model) {
       return;
     }
-    // SDK의 소스맵 skipList와 native Step을 그대로 사용한다. 재귀 가로채기만 잠시 해제한다.
+    // 내부 재개는 사용자 의도를 바꾸지 않는다. 다음 UI 명령도 항상 interceptor를 통과한다.
     const generation = this.#replayGeneration;
-    model.setExecutionInterceptor(null);
-    try {
-      switch (command) {
-        case 'step-into':
-          await model.stepInto(this.#pausedDetails?.callFrames[0]);
-          break;
-        case 'step-over':
-          await model.stepOver(this.#pausedDetails?.callFrames[0]);
-          break;
-        case 'step-out':
-          await model.stepOut(this.#pausedDetails?.callFrames[0]);
-          break;
-        case 'pause':
-          model.pause();
-          break;
-        default:
-          await this.#resumeExecution();
-      }
-    } finally {
-      if (generation === this.#replayGeneration && model === this.#debuggerModel && !this.session.error) {
-        model.setExecutionInterceptor(next => this.#handleExecutionCommand(next));
-      }
+    const response = await model.executeCommand(command, this.#pausedDetails?.callFrames[0], origin);
+    if (generation !== this.#replayGeneration || model !== this.#debuggerModel) {
+      return;
     }
+    if (response.getError()) {
+      throw new Error(response.getError());
+    }
+    this.#notifyProgress();
   }
 
   #currentFunctionId(): string|undefined {
@@ -1658,10 +1653,18 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (scopeSize !== this.#selectedSources.size) {
         await this.#prepareRecordingScripts(true);
       }
-      const step = this.#steps.find(item => item.afterPosition === this.#replayedPositions);
-      if (step) {
-        this.#pendingStep = {...step, functionId: this.#currentFunctionId()};
-        await this.#sendExecution(step.command);
+      const execution = this.session.takeReplayCommand(this.#replayedPositions);
+      if (execution) {
+        const {command} = execution;
+        this.#pendingStep = command === 'step-into' || command === 'step-over' || command === 'step-out' ?
+            {...execution, command, functionId: this.#currentFunctionId()} : null;
+        if (command === 'pause') {
+          // 원본은 실행 중 Pause 요청이다. 재생은 이미 기록용 중단점에 멈췄으므로
+          // 의도만 복원하고 내부 재개로 다음 저장 위치까지 진행한다.
+          await this.#resumeExecution();
+          return;
+        }
+        await this.#sendExecution(command, 'user');
         return;
       }
     }
@@ -1693,11 +1696,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #resumeExecution(): Promise<void> {
-    const response = await this.#debuggerModel?.agent.invoke_resume({terminateOnResume: false});
-    if (response?.getError()) {
-      throw new Error(response.getError());
-    }
-    this.#notifyProgress();
+    await this.#sendExecution('resume');
   }
 
   #releaseRecording(): void {
@@ -1705,6 +1704,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#calibrationAbort = null;
     this.#timing = new ReplayTiming();
     this.#replayGeneration++;
+    this.#preparingExecution = false;
     this.session.history.clear();
     this.#inputs = [];
     this.#pendingConsoleInputs = [];
@@ -1717,7 +1717,6 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#scopeChanges = [];
     this.#scopeChangeIndex = 0;
     this.#scopeEntry = null;
-    this.#steps = [];
     this.#pendingStep = null;
     this.#pausedDetails = undefined;
     this.#activeConsoleInput = null;

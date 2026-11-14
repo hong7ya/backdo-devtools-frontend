@@ -28,23 +28,42 @@ describe('재실행 세션', () => {
     assert.isFalse(session.canReverse);
   });
 
-  it('Step over로 중첩 호출을 건너뛰면서 내부 실행 위치도 기록한다', () => {
+  it('Step over로 건너뛴 내부 실행은 경로에만 남기고 호출 전 위치로 돌아간다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0, 2));
     session.beginExecution('step-over');
     assert.strictEqual(session.recordPause(pause(1, 3)), 'continue');
     assert.strictEqual(session.recordPause(pause(2, 2)), 'show');
-    assert.deepEqual(session.beginReverse(), pause(1).position);
+    assert.lengthOf(session.history, 3);
+    assert.deepEqual(session.beginReverse(), pause(0).position);
+    assert.strictEqual(session.recordPause(pause(0, 2)), 'show');
+    assert.lengthOf(session.history, 1);
+    session.beginExecution('step-into');
+    assert.strictEqual(session.recordPause(pause(1, 3)), 'show');
+    assert.deepEqual(session.beginReverse(), pause(0).position);
   });
 
-  it('Step out은 호출자에서 멈추고 사용자 브레이크포인트는 중첩 호출에서도 지킨다', () => {
+  it('연속 Step out은 이전 사용자 정지로 되돌아가고 중첩 호출의 브레이크포인트도 지킨다', () => {
     const session = new ReplaySession();
     session.recordPause(pause(0, 3));
     session.beginExecution('step-out');
     assert.strictEqual(session.recordPause(pause(1, 3)), 'continue');
     assert.strictEqual(session.recordPause(pause(2, 2)), 'show');
+    session.beginExecution('step-out');
+    assert.strictEqual(session.recordPause(pause(3, 2)), 'continue');
+    assert.strictEqual(session.recordPause(pause(4, 1)), 'show');
+    assert.deepEqual(session.beginReverse(), pause(2).position);
+    assert.strictEqual(session.recordPause(pause(0, 3)), 'continue');
+    assert.strictEqual(session.recordPause(pause(1, 3)), 'continue');
+    assert.strictEqual(session.recordPause(pause(2, 2)), 'show');
+    assert.deepEqual(session.beginReverse(), pause(0).position);
+    assert.strictEqual(session.recordPause(pause(0, 3)), 'show');
     session.beginExecution('step-over');
-    assert.strictEqual(session.recordPause(pause(3, 4, true)), 'show');
+    assert.strictEqual(session.recordPause(pause(5, 4, true)), 'show');
+    session.beginExecution('step-out');
+    assert.strictEqual(session.recordPause(pause(6, 4)), 'continue');
+    assert.strictEqual(session.recordPause(pause(7, 3)), 'show');
+    assert.deepEqual(session.beginReverse(), pause(5).position);
   });
 
   it('재실행 경로가 달라지면 실패 이유만 남기고 이력을 해제한다', () => {

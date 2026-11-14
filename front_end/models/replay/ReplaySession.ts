@@ -74,8 +74,9 @@ export class ReplaySession {
       this.#isAtRecordedPause = true;
       return 'show';
     }
-    this.history.record(pause.position);
     this.#isAtRecordedPause = this.#shouldShowPause(pause);
+    // Step Over·Out이 건너뛴 위치는 재실행 경로에만 남긴다. Resume 경로는 계속 되짚을 수 있다.
+    this.history.record(pause.position, this.#isAtRecordedPause || this.#executionCommand === 'resume');
     return this.#isAtRecordedPause ? 'show' : 'continue';
   }
 
@@ -88,6 +89,9 @@ export class ReplaySession {
   showUserPause(depth: number, atRecordedPosition: boolean): void {
     this.#currentDepth = depth;
     this.#isAtRecordedPause = atRecordedPosition;
+    if (atRecordedPosition) {
+      this.history.markCurrentAsReverseTarget();
+    }
   }
 
   /** 기록 대상 파일 밖의 정지에서는 직전 기록을 현재 위치로 간주하지 않는다. */

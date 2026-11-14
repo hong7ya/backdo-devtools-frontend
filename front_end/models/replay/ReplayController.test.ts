@@ -19,7 +19,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     controllers.clear();
   });
   it('재시작 연동이 없어도 위치 기록을 유지하고 뒤로가기만 비활성화한다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     await pause(model, script, 0);
     await pause(model, script, 1);
     assert.lengthOf(controller.session.history, 2);
@@ -29,8 +29,37 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.include(controller.status, '재시작 연동');
   });
 
+  it('첫 기록 전 Pause를 보존하고 이후 Resume와 거꾸로가기를 재생한다', async () => {
+    const prepared = await createControllerTarget({kind: 'node'});
+    const {controller, model, script} = prepared;
+    const requestPause = sinon.stub(model.agent, 'invoke_pause').resolves({getError: () => undefined});
+    sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    enableReplay(prepared);
+
+    model.pause();
+    sinon.assert.calledOnce(requestPause);
+    assert.include(controller.session.commands[0], {command: 'pause', afterPosition: 0});
+
+    await pause(model, script, 0);
+    model.resume();
+    model.resumedScript();
+    await pause(model, script, 1);
+    await pause(model, script, 0);
+    assert.lengthOf(controller.session.commands, 2);
+    assert.include(controller.session.commands[1], {command: 'resume', afterPosition: 1});
+    controller.configure(async () => {
+      await pause(model, script, 0);
+      await pause(model, script, 1);
+    });
+
+    await controller.reverse();
+    assert.isNull(controller.session.error);
+    assert.strictEqual(controller.currentPosition?.lineNumber, 1);
+    assert.lengthOf(controller.session.history, 2);
+  });
+
   it('보정된 정지 좌표를 기록하고 재시작 후 후보가 달라도 같은 실제 위치로 돌아간다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const first = {lineNumber: 0, columnNumber: 7};
     const second = {lineNumber: 1, columnNumber: 6};
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
@@ -48,7 +77,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     controller.setCalibrationHandler(async () => 1);
     controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/restarted');
     controller.configure(async () => {
-      const restarted = createControllerTarget({kind: 'node', controller});
+      const restarted = await createControllerTarget({kind: 'node', controller});
       (restarted.model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
         locations: [first, second].map(location => ({scriptId: restarted.script.scriptId, ...location})),
         getError: () => undefined,
@@ -68,13 +97,13 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('보정된 위치로 다시 설치해도 실제 정지 순서가 달라지면 복원을 실패 처리한다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     const {controller, model, script} = prepared;
     enableReplay(prepared);
     await pause(model, script, 0);
     await pause(model, script, 1);
     controller.configure(async () => {
-      const restarted = createControllerTarget({kind: 'node', controller});
+      const restarted = await createControllerTarget({kind: 'node', controller});
       const changed = {scriptId: restarted.script.scriptId, lineNumber: 0, columnNumber: 7};
       (restarted.model.agent.invoke_setBreakpoint as sinon.SinonStub)
           .onFirstCall()
@@ -89,7 +118,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('여러 후보가 같은 CDP 중단점으로 보정되어도 실제 정지를 기록할 중단점은 유지한다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const first = {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7};
     const second = {scriptId: script.scriptId, lineNumber: 1, columnNumber: 6};
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
@@ -102,6 +131,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
                      actualLocation: location.lineNumber === 0 ? first : second,
                      getError: () => undefined,
                    }));
+    sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
 
     await pause(model, script, first, Protocol.Debugger.PausedEventReason.Other, ['shared']);
     await pause(model, script, second, Protocol.Debugger.PausedEventReason.Other, ['next']);
@@ -114,7 +144,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('설치 도중 실패하면 앞서 보정되어 설치된 중단점도 모두 제거한다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
     install.onFirstCall().resolves({
       breakpointId: 'shifted',
@@ -132,7 +162,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('보정된 debugger 문에서는 Resume 중에도 사용자에게 정지를 보여 준다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const first = {scriptId: script.scriptId, lineNumber: 0, columnNumber: 7};
     const second = {scriptId: script.scriptId, lineNumber: 1, columnNumber: 6};
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
@@ -160,7 +190,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   for (const kind of ['node', 'console'] as const) {
     it(`${kind === 'node' ? 'Node' : '콘솔'}에서 선택하지 않은 과거 소스는 기록용 중단점을 조회하지 않는다`,
         async () => {
-          const prepared = createControllerTarget({kind});
+          const prepared = await createControllerTarget({kind});
           const {controller, model, script, target, expression} = prepared;
           const expired =
               createScript(model, {id: 'expired', url: 'https://example.test/finished.js', hash: 'expired-hash'});
@@ -182,7 +212,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   }
 
   it('BackDo 내부 소스는 최초 목록과 실행 직전 모두 중단점을 조회하지 않는다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     const {controller, model, script} = prepared;
     const internal = createScript(model, {
       id: 'internal',
@@ -204,8 +234,54 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isNull(controller.session.error);
   });
 
+  it('첫 Resume 전에 debugger 소스를 선택해 앞선 초기화도 기록하고 단순 통과 소스는 제외한다', async () => {
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
+    sinon.assert.calledOnceWithExactly(model.agent.invoke_setInstrumentationBreakpoint as sinon.SinonStub, {
+      instrumentation: Protocol.Debugger.SetInstrumentationBreakpointRequestInstrumentation.BeforeScriptExecution,
+    });
+    const main = createScript(model, {id: 'main', url: 'file:///main.js'});
+    const transit = createScript(model, {id: 'transit', url: 'file:///transit.js'});
+    const scripts = [script, main, transit];
+    sinon.stub(model, 'scripts').returns(scripts);
+    (model.scriptForId as sinon.SinonStub).callsFake(id => scripts.find(script => script.scriptId === id));
+    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).callsFake(async ({start}) => ({
+      locations: [0, 1].map(lineNumber => ({
+        scriptId: start.scriptId,
+        lineNumber,
+        columnNumber: 0,
+        type: start.scriptId === main.scriptId && lineNumber === 1 ?
+            Protocol.Debugger.BreakLocationType.DebuggerStatement : undefined,
+      })),
+      getError: () => undefined,
+    }));
+    const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
+    install.callsFake(async ({location}) => ({
+      breakpointId: `${location.scriptId}:${location.lineNumber}`,
+      actualLocation: location,
+      getError: () => undefined,
+    }));
+    sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+
+    await pause(model, script, 0);
+    model.resume();
+    model.resumedScript();
+    for (const next of [transit, main]) {
+      await model.pausedScript([], Protocol.Debugger.PausedEventReason.Instrumentation, {scriptId: next.scriptId}, []);
+    }
+    assert.isFalse(install.getCalls().some(call => call.args[0].location.scriptId === transit.scriptId));
+    assert.isTrue(install.getCalls().some(call => call.args[0].location.scriptId === main.scriptId));
+
+    await pause(model, main, 0, Protocol.Debugger.PausedEventReason.Other, ['main:0']);
+    model.resumedScript();
+    await pause(model, main, 1, Protocol.Debugger.PausedEventReason.Other, ['main:1']);
+    assert.isNull(controller.session.error);
+    assert.lengthOf(controller.session.history, 3);
+    assert.strictEqual(model.debuggerPausedDetails()?.callFrames[0].script, main);
+    assert.deepInclude(controller.session.history.previous().target, {url: main.sourceURL, lineNumber: 0});
+  });
+
   it('현재 정지한 스크립트가 없다는 응답은 기록 실패로 알린다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     sinon.stub(model, 'scripts').returns([script]);
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({getError: () => 'Script not found'});
     await pause(model, script, 0);
@@ -215,7 +291,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('과거 사용자 소스의 연결 오류도 숨기지 않는다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     sinon.stub(model, 'scripts').returns([script]);
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({getError: () => 'Connection is closed'});
     await pause(model, script, 0);
@@ -224,7 +300,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('기록용 중단점과 함께 전달된 XHR 정지도 사용자에게 보여 준다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     const {model, script} = prepared;
     enableReplay(prepared);
     await pause(model, script, 0);
@@ -238,7 +314,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('일반 중단점이 없는 ESM 시작 위치도 프로세스의 시작 정지로 복원한다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const startReason = 'Break on start' as Protocol.Debugger.PausedEventReason;
     (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).resolves({
       locations: [{scriptId: script.scriptId, lineNumber: 1, columnNumber: 0}],
@@ -248,7 +324,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/restarted');
     controller.configure(async () => await pause(model, script, 0, startReason, []));
     await pause(model, script, 0, startReason, []);
-    await pause(model, script, 1, Protocol.Debugger.PausedEventReason.Other, ['0']);
+    await pause(model, script, 1, Protocol.Debugger.PausedEventReason.Other, ['0', 'user-breakpoint']);
     assert.isTrue(controller.canReverse(model));
     await controller.reverse();
     assert.isNull(controller.session.error);
@@ -256,7 +332,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('같은 위치의 XHR 추가 정지는 표시하되 재실행 방문 횟수에 더하지 않는다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     const {controller, model, script} = prepared;
     enableReplay(prepared);
     await pause(model, script, 0);
@@ -273,7 +349,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('재시작 전에 사용자 중단점을 해제하고 실패해도 복구를 마친 뒤 버튼을 돌려준다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     const {controller, model, script} = prepared;
     enableReplay(prepared);
     await pause(model, script, 0);
@@ -306,7 +382,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('콘솔에서 입력한 익명 소스에 파일 경로 없이 일반 브레이크포인트를 설치한다', async () => {
-    const {controller, model, script, target, expression} = createControllerTarget({kind: 'console'});
+    const {controller, model, script, target, expression} = await createControllerTarget({kind: 'console'});
     recordConsoleCommand(target, expression);
     model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
     await pause(model, script, 0);
@@ -321,7 +397,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('일시정지 중 콘솔 조회·수정은 완료할 때마다 같은 위치의 한 단계로 기록한다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     const {controller, model, script, target} = prepared;
     enableReplay(prepared);
     await pause(model, script, 0);
@@ -351,7 +427,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('복원 중 사용자가 콘솔 코드를 실행하면 성공으로 표시하지 않고 종료한다', async () => {
-    const {controller, model, script, target} = createControllerTarget({kind: 'node'});
+    const {controller, model, script, target} = await createControllerTarget({kind: 'node'});
     enableReplay({controller, model, script, target});
     await pause(model, script, 0);
     await pause(model, script, 1);
@@ -364,7 +440,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('Console 입력·원문·소스 수의 고정 상한으로 기록을 종료하지 않는다', async () => {
-    const {controller, target, model, expression} = createControllerTarget({kind: 'console'});
+    const {controller, target, model, expression} = await createControllerTarget({kind: 'console'});
     // 과거 256개 입력·소스 및 2MiB 원문 상한의 재도입을 잡는 경계값이다.
     for (let index = 0; index < 257; index++) {
       recordConsoleCommand(target, expression);
@@ -381,7 +457,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   it('사용자 대기는 기록을 유지하고 예상 CDP 처리가 3초에 도달하면 기록 전체를 종료한다', async () => {
     const clock = sinon.useFakeTimers();
     try {
-      const prepared = createControllerTarget({kind: 'node'});
+      const prepared = await createControllerTarget({kind: 'node'});
       const {controller, model, script} = prepared;
       enableReplay(prepared, {roundTripMs: 1500});
       await pause(model, script, 0);
@@ -404,7 +480,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('최초 왕복 측정값이 3초면 진행 기록을 해제하고 재측정을 반복하지 않는다', async () => {
-    const prepared = createControllerTarget({kind: 'node'});
+    const prepared = await createControllerTarget({kind: 'node'});
     enableReplay(prepared, {roundTripMs: 3000});
     await pause(prepared.model, prepared.script, 0);
     assert.include(prepared.controller.session.error ?? '', '예상 CDP 처리 시간이 3초');
@@ -414,7 +490,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('더미 측정이 끝나기 전에도 Step으로 다음 위치를 기록한다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const step = sinon.stub(model.agent, 'invoke_stepInto').resolves({getError: () => undefined});
     controller.setCalibrationHandler(() => new Promise(() => {}));
     await pause(model, script, 0);
@@ -431,7 +507,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   it('실행 컨텍스트가 교체되면 이전 측정의 늦은 결과를 적용하지 않는다', async () => {
-    const {controller, model, script} = createControllerTarget({kind: 'node'});
+    const {controller, model, script} = await createControllerTarget({kind: 'node'});
     const measurement = Promise.withResolvers<number>();
     let signal: AbortSignal|undefined;
     controller.setCalibrationHandler(cancellation => {
@@ -449,8 +525,8 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isNull(controller.estimatedReplayMs);
   });
 
-  it('브라우저 문서가 교체되어도 같은 세션의 입력 기록을 유지한다', () => {
-    const {controller, target, model} = createControllerTarget({kind: 'console'});
+  it('브라우저 문서가 교체되어도 같은 세션의 입력 기록을 유지한다', async () => {
+    const {controller, target, model} = await createControllerTarget({kind: 'console'});
     recordConsoleCommand(target, 'const first = 1;');
     model.globalObjectCleared();
     assert.strictEqual(controller.inputCount, 1);
@@ -464,7 +540,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const clock = sinon.useFakeTimers();
     const connection = Promise.withResolvers<void>();
     try {
-      const prepared = createControllerTarget({kind: 'node'});
+      const prepared = await createControllerTarget({kind: 'node'});
       const {controller, model, script} = prepared;
       enableReplay(prepared);
       await pause(model, script, 0);
@@ -491,7 +567,7 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 });
 
-function createControllerTarget({kind, controller = new Replay.ReplayController.ReplayController()}: {
+async function createControllerTarget({kind, controller = new Replay.ReplayController.ReplayController()}: {
   kind: Replay.ReplayEndpoint.TargetKind,
   controller?: Replay.ReplayController.ReplayController,
 }) {
@@ -522,7 +598,7 @@ function createControllerTarget({kind, controller = new Replay.ReplayController.
                                                               actualLocation: location,
                                                               getError: () => undefined,
                                                             }));
-  controller.attach(target);
+  await controller.attach(target);
   return {controller, target, model, script, expression};
 }
 
@@ -542,7 +618,7 @@ function createScript(
 // 실제 연결 대신 첫 위치 정지를 전달한다. 측정을 시작하는 pause는 각 테스트에서 명시한다.
 function enableReplay(
     {controller, model, script, target}:
-        Pick<ReturnType<typeof createControllerTarget>, 'controller'|'model'|'script'|'target'>,
+        Pick<Awaited<ReturnType<typeof createControllerTarget>>, 'controller'|'model'|'script'|'target'>,
     {roundTripMs = 1}: {roundTripMs?: number} = {}): void {
   controller.setRestartHandler(async () => 'ws://127.0.0.1:9229/new');
   sinon.stub(target.router()!.connection(), 'disconnect').resolves();
@@ -570,7 +646,9 @@ function recordConsoleCommand(target: SDK.Target.Target, expression: string): SD
 async function pause(
     model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script,
     position: number|{lineNumber: number, columnNumber: number}, reason = Protocol.Debugger.PausedEventReason.Other,
-    breakpointIds: string[] = [String(typeof position === 'number' ? position : position.lineNumber)]): Promise<void> {
+    // 기본은 사용자가 보는 정지다. 내부 기록 정지는 호출부에서 기록용 ID만 전달한다.
+    breakpointIds: string[] = [String(typeof position === 'number' ? position : position.lineNumber), 'user-breakpoint']):
+    Promise<void> {
   const location = typeof position === 'number' ? {lineNumber: position, columnNumber: 0} : position;
   await model.pausedScript(
       [{

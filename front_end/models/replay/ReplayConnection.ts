@@ -154,7 +154,7 @@ export class ReplayConnection {
     this.#target = target;
     manager.setScopeTarget(target);
     options.onTargetCreated(target);
-    this.#controller.attach(target);
+    await this.#controller.attach(target);
     const response = await target.runtimeAgent().invoke_runIfWaitingForDebugger();
     if (response.getError()) {
       throw new Error(response.getError());

@@ -12,8 +12,7 @@ export function sourceKey(url: string, original = false): string {
 
 export class ScriptScope {
   private constructor(
-      readonly script: SDK.Script.Script, readonly url: string,
-      readonly sourceMap: SDK.SourceMap.SourceMap|undefined) {
+      readonly script: SDK.Script.Script, readonly url: string, readonly sourceMap: SDK.SourceMap.SourceMap|undefined) {
   }
 
   static async create(script: SDK.Script.Script, url: string): Promise<ScriptScope> {

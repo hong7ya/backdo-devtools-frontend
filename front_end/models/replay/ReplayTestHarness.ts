@@ -37,6 +37,24 @@ class ReplayTestHarness implements BrowserTestClient {
     return this.#debuggerModel()?.debuggerPausedDetails()?.reason ?? null;
   }
 
+  async readPausedValue(expression: string): Promise<unknown> {
+    const frame = this.#debuggerModel()?.selectedCallFrame();
+    if (!frame) {
+      throw new Error('값을 확인할 정지 프레임이 없습니다.');
+    }
+    const response = await frame.debuggerModel.agent.invoke_evaluateOnCallFrame({
+      callFrameId: frame.id,
+      expression,
+      returnByValue: true,
+      throwOnSideEffect: true,
+      silent: true,
+    });
+    if (response.getError() || response.exceptionDetails) {
+      throw new Error(response.getError() || response.exceptionDetails?.text);
+    }
+    return response.result.value;
+  }
+
   sourceIsVisible(source: string): boolean {
     const editor = Sources.SourcesPanel.SourcesPanel.instance().sourcesViewInternal.currentSourceFrame()?.textEditor;
     return Boolean(editor?.state.doc.toString().includes(source.trim()));

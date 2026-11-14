@@ -320,22 +320,34 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isTrue(requests.every(call => !('condition' in call.args[0])));
   });
 
-  it('일시정지 중 콘솔 조회·수정은 재실행 입력에 넣지 않고 거꾸로가기를 유지한다', async () => {
+  it('일시정지 중 콘솔 조회·수정은 완료할 때마다 같은 위치의 한 단계로 기록한다', async () => {
     const prepared = createControllerTarget({kind: 'node'});
     const {controller, model, script, target} = prepared;
     enableReplay(prepared);
     await pause(model, script, 0);
     await pause(model, script, 1);
-    const usage = controller.recordingUsage;
+    const position = controller.currentPosition;
+    const consoleModel = target.model(SDK.ConsoleModel.ConsoleModel)!;
+    const runtimeModel = target.model(SDK.RuntimeModel.RuntimeModel)!;
     for (const expression of ['value', 'value = 2']) {
-      recordConsoleCommand(target, expression);
+      const usage = controller.recordingUsage;
+      const commandMessage = recordConsoleCommand(target, expression);
+      assert.isTrue(controller.busy);
+      assert.isFalse(controller.canReverse(model));
+      assert.strictEqual(controller.recordingUsage.positions, usage.positions);
+      assert.strictEqual(controller.recordingUsage.consoleInputs, usage.consoleInputs + 1);
+      consoleModel.dispatchEventToListeners(SDK.ConsoleModel.Events.CommandEvaluated, {
+        commandMessage,
+        result: runtimeModel.createRemoteObject({type: Protocol.Runtime.RemoteObjectType.Number, value: 2}),
+      });
       assert.isNull(controller.session.error);
-      assert.deepEqual(controller.recordingUsage, usage);
+      assert.isFalse(controller.busy);
+      assert.strictEqual(controller.recordingUsage.positions, usage.positions + 1);
+      assert.strictEqual(controller.recordingUsage.consoleInputs, usage.consoleInputs + 1);
+      assert.deepEqual(controller.currentPosition, position);
       assert.isTrue(controller.canReverse(model));
+      assert.include(controller.status, 'Console 입력 이전');
     }
-    await controller.reverse();
-    assert.isNull(controller.session.error);
-    assert.lengthOf(controller.session.history, 1);
   });
 
   it('복원 중 사용자가 콘솔 코드를 실행하면 성공으로 표시하지 않고 종료한다', async () => {
@@ -538,19 +550,21 @@ function enableReplay(
   controller.setCalibrationHandler(async () => roundTripMs);
 }
 
-function recordConsoleCommand(target: SDK.Target.Target, expression: string): void {
+function recordConsoleCommand(target: SDK.Target.Target, expression: string): SDK.ConsoleModel.ConsoleMessage {
   dispatchEvent(target, 'Runtime.executionContextCreated', {
     context: {id: 1, origin: '', name: '', uniqueId: 'context', auxData: {isDefault: true}},
   });
   const context = target.model(SDK.RuntimeModel.RuntimeModel)!.defaultExecutionContext()!;
   const consoleModel = target.model(SDK.ConsoleModel.ConsoleModel)!;
+  const commandMessage = consoleModel.addCommandMessage(context, expression);
   consoleModel.dispatchEventToListeners(SDK.ConsoleModel.Events.CommandWillBeEvaluated, {
-    commandMessage: consoleModel.addCommandMessage(context, expression),
+    commandMessage,
     executionContext: context,
     expression,
     useCommandLineAPI: true,
     userGesture: false,
   });
+  return commandMessage;
 }
 
 async function pause(

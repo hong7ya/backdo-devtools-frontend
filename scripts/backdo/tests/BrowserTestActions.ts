@@ -7,6 +7,11 @@ import type {Page} from 'puppeteer-core';
 import {typeIntoConsole} from '../../../test/e2e/helpers/console-helpers.js';
 import {pasteText} from '../../../test/shared/helper.js';
 
+/** 검증용 조회는 사용자의 Console 실행 이력에 새 단계를 추가하지 않는다. */
+export async function readPausedValue(page: Page, expression: string): Promise<unknown> {
+  return await page.evaluate(input => window.backdoTest.readPausedValue(input), expression);
+}
+
 export async function enterConsoleCode(page: Page, source: string): Promise<void> {
   await page.locator('pierce/#tab-console').click();
   if (!source.includes('\n')) {

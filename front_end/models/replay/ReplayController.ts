@@ -24,6 +24,12 @@ interface ConsoleInput {
   useCommandLineAPI: boolean;
   userGesture: boolean;
   exception?: string;
+  callFrame?: {
+    index: number,
+    inlineFrameIndex: number,
+    functionName: string,
+    position: ExecutionPosition,
+  };
 }
 
 interface RecordedScript {
@@ -98,7 +104,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #preparedScopeSizes = new Map<string, number>();
   #steps: RecordedStep[] = [];
   #pendingStep: RecordedStep|null = null;
-  #pausedFrame: SDK.DebuggerModel.CallFrame|undefined;
+  #pausedDetails: SDK.DebuggerModel.DebuggerPausedDetails|undefined;
+  #pendingConsoleInputs: Array<RecordedInput&ConsoleInput> = [];
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
   #prepareTarget: (() => Promise<void>)|null = null;
   #connectToTarget: ((ws: string) => Promise<void>)|null = null;
@@ -143,7 +150,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get busy(): boolean {
-    return this.#isReplaying;
+    return this.#isReplaying || this.#pendingConsoleInputs.length > 0;
+  }
+
+  get busyLabel(): string {
+    return this.#pendingConsoleInputs.length ? 'Console 실행 중' : '복원 중';
   }
 
   get currentPosition(): ExecutionPosition|null {
@@ -217,6 +228,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.session.error) {
       return `뒤로가기 사용 불가: ${this.session.error}`;
     }
+    if (this.#pendingConsoleInputs.length) {
+      return 'Console 입력이 끝나면 실행 위치와 함께 기록합니다.';
+    }
     if (this.calibrating) {
       return '별도 더미 프로세스에서 CDP 응답 시간을 측정하고 있습니다.';
     }
@@ -234,6 +248,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     if (this.#debuggerModel?.isPaused() && this.session.history.length && !this.session.atRecordedPause) {
       return '현재 정지 위치는 실행 기록 대상이 아닙니다. Ignore List 설정을 확인해 주세요.';
+    }
+    if (this.session.canReverse &&
+        this.#inputs.some(
+            input => input.type === 'console' && input.callFrame &&
+                input.afterPosition === this.session.history.length - 1)) {
+      return 'Console 입력 이전 상태로 복원';
     }
     return this.session.canReverse ? '프로세스를 다시 실행하여 직전 실행 위치로 이동' :
                                      '기록된 이전 실행 위치가 없습니다.';
@@ -272,7 +292,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#debuggerModel?.setExecutionInterceptor(null);
     this.#documentEpoch++;
     this.#debuggerModel = model;
-    this.#pausedFrame = undefined;
+    this.#pausedDetails = undefined;
     this.#browserTouchEnabled = false;
     this.#browserViewport = null;
     this.#scriptsPrepared = false;
@@ -458,7 +478,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#scripts.clear();
         this.#scriptScopes.clear();
         this.#preparedScopeSizes.clear();
-        this.#pausedFrame = undefined;
+        this.#pausedDetails = undefined;
         this.#consoleSources.clear();
         this.#activeConsoleInput = null;
         this.#recordingBreakpointIds.clear();
@@ -545,6 +565,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
           input.exception = consoleExceptionMessage(event.data.exceptionDetails);
           this.#completeInput(input);
           this.#consoleInputByMessage.delete(event.data.commandMessage);
+          this.#finishConsoleInputs();
+        }
+      }));
+      this.#listeners.push(consoleModel.addEventListener(SDK.ConsoleModel.Events.CommandEvaluationFailed, event => {
+        if (this.#consoleInputByMessage.has(event.data.commandMessage)) {
+          this.fail(new Error(`Console 입력을 실행하지 못했습니다: ${event.data.error}`));
         }
       }));
     }
@@ -564,16 +590,66 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error('복원 중 콘솔에서 코드가 실행되어 뒤로가기를 중단했습니다. 새 세션에서 시작해 주세요.'));
       return;
     }
-    if (this.#debuggerModel?.isPaused()) {
-      // 일시정지 중 조회·수정은 기존 콘솔에 맡긴다. 수동 변경은 재실행 입력으로 저장하지 않는다.
-      return;
+    const model = this.#debuggerModel;
+    let callFrame: ConsoleInput['callFrame'];
+    if (model?.isPaused()) {
+      const selected = model.selectedCallFrame();
+      const frames = model.debuggerPausedDetails()?.callFrames ?? [];
+      const ids = [...new Set(frames.map(frame => frame.id))];
+      if (!selected || !this.session.atRecordedPause || !this.#lastPosition) {
+        this.fail(new Error('기록되지 않은 정지에서 Console을 실행했습니다. 새 기록에서 시작해 주세요.'));
+        return;
+      }
+      callFrame = {
+        index: ids.indexOf(selected.id),
+        inlineFrameIndex: selected.inlineFrameIndex,
+        functionName: selected.functionName,
+        position: this.#framePosition(selected),
+      };
     }
     const {expression, useCommandLineAPI, userGesture} = command;
-    this.#activeConsoleInput = this.#inputs.length;
-    const input =
-        this.#appendInput({type: 'console', expression, useCommandLineAPI, userGesture}, true) as RecordedInput &
+    if (!callFrame) {
+      this.#activeConsoleInput = this.#inputs.length;
+    }
+    const input = this.#appendInput({type: 'console', expression, useCommandLineAPI, userGesture, callFrame}, true) as
+            RecordedInput &
         ConsoleInput;
+    if (callFrame) {
+      // 연속 Enter도 제출 순서대로 각자의 상태 경계를 갖는다.
+      input.afterPosition += this.#pendingConsoleInputs.length;
+      this.#pendingConsoleInputs.push(input);
+    }
     this.#consoleInputByMessage.set(command.commandMessage, input);
+    this.#notifyStatusChanged();
+  }
+
+  #framePosition(frame: SDK.DebuggerModel.CallFrame): ExecutionPosition {
+    const {lineNumber, columnNumber} = frame.location();
+    return {
+      url: this.#scriptScopes.get(frame.script.scriptId)?.url ?? frame.script.sourceURL,
+      hash: frame.script.hash,
+      lineNumber,
+      columnNumber,
+    };
+  }
+
+  #finishConsoleInputs(): void {
+    while (this.#pendingConsoleInputs.length) {
+      const input = this.#pendingConsoleInputs[0];
+      if (!this.#completedInputs.has(input.sequence)) {
+        break;
+      }
+      if (!this.#debuggerModel?.isPaused() || !this.session.atRecordedPause || !this.#lastPosition ||
+          input.afterPosition !== this.session.history.length) {
+        this.fail(new Error('Console 입력 중 실행 위치가 바뀌어 기록을 중단했습니다.'));
+        return;
+      }
+      this.#pendingConsoleInputs.shift();
+      this.session.recordConsoleInput(this.#lastPosition);
+      if (!this.#finishRecordedPosition()) {
+        return;
+      }
+    }
     this.#notifyStatusChanged();
   }
 
@@ -607,6 +683,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #beginReplay(): {promise: Promise<void>, clearTimeout: () => void} {
     this.session.beginReverse();
     this.#replayGeneration++;
+    // 재시작으로 취소되는 이전 대상의 Console 응답은 새 재생에 반영하지 않는다.
+    this.#consoleInputByMessage = new WeakMap();
     this.#isReplaying = true;
     this.#replayedPositions = 0;
     this.#selectedSources.clear();
@@ -717,7 +795,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       const submitted = Promise.withResolvers<void>();
       const onSent = (): void => {
-        if (input.type === 'console') {
+        if (input.type === 'console' && !input.callFrame) {
           this.#activeConsoleInput = index;
         }
         this.#replayInputCount = index + 1;
@@ -728,6 +806,23 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         submitted.resolve();
         this.#notifyProgress();
       };
+      if (input.type === 'console' && input.callFrame) {
+        // 멈춘 프레임의 명령은 평가가 끝난 뒤에만 다음 상태로 진행한다.
+        await this.#dispatchInput(input, generation, onSent);
+        if (!this.#replayActive(generation)) {
+          return;
+        }
+        this.#completeInput(input);
+        if (!this.#lastPosition) {
+          throw new Error('Console 입력을 재생할 정지 위치가 없습니다.');
+        }
+        this.session.recordConsoleInput(this.#lastPosition);
+        if (!this.#finishRecordedPosition()) {
+          return;
+        }
+        this.#notifyProgress();
+        continue;
+      }
       // 원본에서 완료된 입력만 장벽으로 삼는다. debugger 때문에 미완료였던
       // press/evaluate는 다음 release 등을 막지 않고 실제 전송 순서만 보존한다.
       void this.#dispatchInput(input, generation, onSent)
@@ -800,25 +895,56 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       onSent();
     }
     if (input.type === 'console') {
-      const response = await target.runtimeAgent().invoke_evaluate({
-        expression: input.expression,
-        includeCommandLineAPI: input.useCommandLineAPI,
-        userGesture: input.userGesture,
-        objectGroup: 'console',
-        replMode: true,
-        awaitPromise: false,
-        allowUnsafeEvalBlockedByCSP: false,
-      });
+      let exceptionDetails: Protocol.Runtime.ExceptionDetails|undefined;
+      let error: string|undefined;
+      if (input.callFrame) {
+        const {index, inlineFrameIndex, functionName, position} = input.callFrame;
+        const frames = this.#pausedDetails?.callFrames ?? [];
+        const frame = [...new Map(frames.map(frame => [frame.id, frame])).values()][index];
+        if (!frame || !samePosition(this.#framePosition(frame), position)) {
+          throw new Error('Console 입력의 호출 프레임이 원래 기록과 다릅니다.');
+        }
+        const selected = inlineFrameIndex ?
+            new SDK.DebuggerModel.CallFrame(
+                frame.debuggerModel, frame.script, frame.payload, inlineFrameIndex, functionName) :
+            frame;
+        const result = await selected.evaluate({
+          expression: input.expression,
+          objectGroup: 'console',
+          includeCommandLineAPI: input.useCommandLineAPI,
+          silent: false,
+          returnByValue: false,
+          generatePreview: false,
+        });
+        if ('error' in result) {
+          error = result.error;
+        } else {
+          exceptionDetails = result.exceptionDetails;
+          result.object?.release();
+        }
+      } else {
+        const response = await target.runtimeAgent().invoke_evaluate({
+          expression: input.expression,
+          includeCommandLineAPI: input.useCommandLineAPI,
+          userGesture: input.userGesture,
+          objectGroup: 'console',
+          replMode: true,
+          awaitPromise: false,
+          allowUnsafeEvalBlockedByCSP: false,
+        });
+        error = response.getError();
+        exceptionDetails = response.exceptionDetails;
+      }
       if (generation !== this.#replayGeneration) {
         return;
       }
       if (epoch !== this.#documentEpoch) {
         return;
       }
-      if (response.getError() && this.session.replaying) {
-        throw new Error(response.getError());
+      if (error && this.session.replaying) {
+        throw new Error(error);
       }
-      const exception = consoleExceptionMessage(response.exceptionDetails);
+      const exception = consoleExceptionMessage(exceptionDetails);
       if (!this.session.replaying) {
         input.exception = exception;
       } else if (exception !== input.exception) {
@@ -1210,7 +1336,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         return true;
       }
       const frame = details.callFrames[0];
-      this.#pausedFrame = frame;
+      this.#pausedDetails = details;
       if (this.#entryBreakpoint) {
         if (!details.breakpointIds.includes(this.#entryBreakpoint)) {
           await this.#resumeExecution();
@@ -1349,25 +1475,20 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
           input.afterPosition = this.session.history.length;
         }
       }
-      if (!this.#isReplaying && this.session.history.canReverse &&
-          (this.#timing.estimate(this.session.history.length) ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
-        throw new Error(REPLAY_TIME_LIMIT_MESSAGE);
+      if (!this.#finishRecordedPosition()) {
+        return false;
       }
-      if (this.#isReplaying) {
-        this.#replayedPositions++;
-        if (!this.session.replaying) {
-          this.#finishInputReplay();
-        }
-      }
-      this.#notifyUsageChanged();
       if (disposition === 'continue') {
         await this.#flushInputsAtPause(generation);
         if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel ||
             generation !== this.#replayGeneration) {
           return true;
         }
-        await this.#continueExecution(details.callFrames.length);
-        return true;
+        if (!this.#isReplaying || this.session.replaying) {
+          await this.#continueExecution(details.callFrames.length);
+          return true;
+        }
+        // Console 명령 완료가 목표였다면 같은 pause를 SDK에 표시한다.
       }
       this.#pendingStep = null;
       this.#notifyProgress();
@@ -1386,6 +1507,22 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#notifyProgress();
       }
     }
+  }
+
+  #finishRecordedPosition(): boolean {
+    if (!this.#isReplaying && this.session.history.canReverse &&
+        (this.#timing.estimate(this.session.history.length) ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
+      this.fail(new Error(REPLAY_TIME_LIMIT_MESSAGE));
+      return false;
+    }
+    if (this.#isReplaying) {
+      this.#replayedPositions++;
+      if (!this.session.replaying) {
+        this.#finishInputReplay();
+      }
+    }
+    this.#notifyUsageChanged();
+    return true;
   }
 
   #handleExecutionCommand(command: SDK.DebuggerModel.ExecutionCommand): boolean {
@@ -1444,13 +1581,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     try {
       switch (command) {
         case 'step-into':
-          await model.stepInto(this.#pausedFrame);
+          await model.stepInto(this.#pausedDetails?.callFrames[0]);
           break;
         case 'step-over':
-          await model.stepOver(this.#pausedFrame);
+          await model.stepOver(this.#pausedDetails?.callFrames[0]);
           break;
         case 'step-out':
-          await model.stepOut(this.#pausedFrame);
+          await model.stepOut(this.#pausedDetails?.callFrames[0]);
           break;
         case 'pause':
           model.pause();
@@ -1496,9 +1633,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   async #flushInputsAtPause(generation: number): Promise<void> {
     this.#notifyProgress();
     while (this.#replayActive(generation)) {
+      const evaluating = this.#inputs.some(
+          input => input.type === 'console' && input.callFrame && input.sequence < this.#replayInputCount &&
+              !this.#completedInputs.has(input.sequence));
       const next = this.#inputs[this.#replayInputCount];
-      if (!next || !next.paused || next.afterPosition !== this.#replayedPositions || next.document !== this.#document ||
-          (next.loaded && !this.#documentLoaded)) {
+      const waiting = next?.paused && next.afterPosition === this.#replayedPositions &&
+          next.document === this.#document && (!next.loaded || this.#documentLoaded);
+      if (!evaluating && !waiting) {
         return;
       }
       await new Promise<void>(resolve => this.#progressListeners.add(resolve));
@@ -1520,6 +1661,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#replayGeneration++;
     this.session.history.clear();
     this.#inputs = [];
+    this.#pendingConsoleInputs = [];
     this.#consoleInputByMessage = new WeakMap();
     this.#consoleSources.clear();
     this.#scripts.clear();
@@ -1531,7 +1673,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#scopeEntry = null;
     this.#steps = [];
     this.#pendingStep = null;
-    this.#pausedFrame = undefined;
+    this.#pausedDetails = undefined;
     this.#activeConsoleInput = null;
     this.#startURL = null;
     this.#recordingStart = null;

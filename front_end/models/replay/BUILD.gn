@@ -11,6 +11,7 @@ devtools_module("replay") {
   sources = [
     "ExecutionHistory.ts",
     "LocalTargetLifecycle.ts",
+    "RecordingScope.ts",
     "ReplayCalibration.ts",
     "ReplayConnection.ts",
     "ReplayController.ts",
@@ -26,6 +27,7 @@ devtools_module("replay") {
     "../../core/sdk:bundle",
     "../../generated:protocol",
     "../bindings:bundle",
+    "../breakpoints:bundle",
   ]
 }
 

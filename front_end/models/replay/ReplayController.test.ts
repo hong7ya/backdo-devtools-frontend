@@ -158,27 +158,27 @@ describeWithMockConnection('공통 재실행 제어기', () => {
   });
 
   for (const kind of ['node', 'console'] as const) {
-    it(`${kind === 'node' ? 'Node' : '콘솔'}에서 과거 사용자 소스의 조회 실패도 원인과 함께 알린다`, async () => {
-      const prepared = createControllerTarget({kind});
-      const {controller, model, script, target, expression} = prepared;
-      const expired =
-          createScript(model, {id: 'expired', url: 'https://example.test/finished.js', hash: 'expired-hash'});
-      sinon.stub(model, 'scripts').returns([expired]);
-      (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub)
-          .withArgs(sinon.match({start: sinon.match({scriptId: expired.scriptId})}))
-          .resolves({getError: () => 'Script not found'});
-      if (kind === 'console') {
-        recordConsoleCommand(target, expression);
-        model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
-      }
-      enableReplay(prepared);
-      await pause(model, script, 0);
-      assert.include(controller.status, '중단점 위치를 조회하지 못했습니다');
-      assert.include(controller.status, expired.sourceURL);
-      assert.include(controller.status, 'Script not found');
-      assert.isFalse(controller.canReverse(model));
-      assert.lengthOf(controller.session.history, 0);
-    });
+    it(`${kind === 'node' ? 'Node' : '콘솔'}에서 선택하지 않은 과거 소스는 기록용 중단점을 조회하지 않는다`,
+        async () => {
+          const prepared = createControllerTarget({kind});
+          const {controller, model, script, target, expression} = prepared;
+          const expired =
+              createScript(model, {id: 'expired', url: 'https://example.test/finished.js', hash: 'expired-hash'});
+          sinon.stub(model, 'scripts').returns([expired]);
+          (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub)
+              .withArgs(sinon.match({start: sinon.match({scriptId: expired.scriptId})}))
+              .resolves({getError: () => 'Script not found'});
+          if (kind === 'console') {
+            recordConsoleCommand(target, expression);
+            model.dispatchEventToListeners(SDK.DebuggerModel.Events.ParsedScriptSource, script);
+          }
+          enableReplay(prepared);
+          await pause(model, script, 0);
+          assert.isNull(controller.session.error);
+          assert.lengthOf(controller.session.history, 1);
+          const requests = (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).getCalls();
+          assert.isFalse(requests.some(call => call.args[0].start.scriptId === expired.scriptId));
+        });
   }
 
   it('BackDo 내부 소스는 최초 목록과 실행 직전 모두 중단점을 조회하지 않는다', async () => {
@@ -403,14 +403,15 @@ describeWithMockConnection('공통 재실행 제어기', () => {
 
   it('더미 측정이 끝나기 전에도 Step으로 다음 위치를 기록한다', async () => {
     const {controller, model, script} = createControllerTarget({kind: 'node'});
-    const resume = sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
+    const step = sinon.stub(model.agent, 'invoke_stepInto').resolves({getError: () => undefined});
     controller.setCalibrationHandler(() => new Promise(() => {}));
     await pause(model, script, 0);
 
     await model.stepInto();
     await pause(model, script, 1);
 
-    sinon.assert.calledOnce(resume);
+    await Promise.resolve();
+    sinon.assert.calledOnce(step);
     assert.isTrue(controller.calibrating);
     assert.isFalse(controller.busy);
     assert.deepInclude(controller.currentPosition, {lineNumber: 1, columnNumber: 0});

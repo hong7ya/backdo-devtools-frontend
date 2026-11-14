@@ -1232,9 +1232,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       previous?: RecordedScript): Promise<RecordedScript> {
     const url = scope.url;
     const model = script.debuggerModel;
+    // end는 제외 경계이므로 생략해 스크립트 끝의 모듈 반환 위치도 포함한다.
     const result = await model.agent.invoke_getPossibleBreakpoints({
       start: {scriptId: script.scriptId, lineNumber: script.lineOffset, columnNumber: script.columnOffset},
-      end: {scriptId: script.scriptId, lineNumber: script.endLine, columnNumber: script.endColumn},
       restrictToFunction: false,
     });
     const error = result.getError();

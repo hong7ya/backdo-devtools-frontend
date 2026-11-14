@@ -36,6 +36,7 @@ devtools_entrypoint("bundle") {
     "../../ui/components/linkifier/*",
     "../../ui/legacy/components/utils/*",
     "../persistence/*",
+    "../replay/*",
   ]
 
   visibility += devtools_models_visibility

@@ -475,11 +475,10 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     this.#computeAutoStepRangesCallback = callback;
   }
 
-  private async computeAutoStepSkipList(mode: StepMode): Promise<Protocol.Debugger.LocationRange[]> {
+  private async computeAutoStepSkipList(mode: StepMode, callFrame = this.#debuggerPausedDetailsInternal?.callFrames[0]):
+      Promise<Protocol.Debugger.LocationRange[]> {
     let ranges: LocationRange[] = [];
-    if (this.#computeAutoStepRangesCallback && this.#debuggerPausedDetailsInternal &&
-        this.#debuggerPausedDetailsInternal.callFrames.length > 0) {
-      const [callFrame] = this.#debuggerPausedDetailsInternal.callFrames;
+    if (this.#computeAutoStepRangesCallback && callFrame) {
       ranges = await this.#computeAutoStepRangesCallback.call(null, mode, callFrame);
     }
     const skipList = ranges.map(({start, end}) => ({
@@ -490,28 +489,29 @@ export class DebuggerModel extends SDKModel<EventTypes> {
     return sortAndMergeRanges(skipList);
   }
 
-  async stepInto(): Promise<void> {
+  async stepInto(callFrame?: CallFrame): Promise<void> {
     if (this.#executionInterceptor?.('step-into')) {
       return;
     }
-    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_INTO);
+    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_INTO, callFrame);
     void this.agent.invoke_stepInto({breakOnAsyncCall: false, skipList});
   }
 
-  async stepOver(): Promise<void> {
+  async stepOver(callFrame?: CallFrame): Promise<void> {
     if (this.#executionInterceptor?.('step-over')) {
       return;
     }
-    this.#autoSteppingContext = this.#debuggerPausedDetailsInternal?.callFrames[0]?.functionLocation() ?? null;
-    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OVER);
+    this.#autoSteppingContext =
+        (callFrame ?? this.#debuggerPausedDetailsInternal?.callFrames[0])?.functionLocation() ?? null;
+    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OVER, callFrame);
     void this.agent.invoke_stepOver({skipList});
   }
 
-  async stepOut(): Promise<void> {
+  async stepOut(callFrame?: CallFrame): Promise<void> {
     if (this.#executionInterceptor?.('step-out')) {
       return;
     }
-    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OUT);
+    const skipList = await this.computeAutoStepSkipList(StepMode.STEP_OUT, callFrame);
     if (skipList.length !== 0) {
       void this.agent.invoke_stepOver({skipList});
     } else {

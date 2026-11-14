@@ -7,8 +7,10 @@ import type * as Platform from '../../core/platform/platform.js';
 import * as ProtocolClient from '../../core/protocol_client/protocol_client.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Bindings from '../bindings/bindings.js';
+import * as Breakpoints from '../breakpoints/breakpoints.js';
 
 import {LocalTargetLifecycle} from './LocalTargetLifecycle.js';
+import {sourceKey} from './RecordingScope.js';
 import {type CalibrationProcess, measureRoundTrip} from './ReplayCalibration.js';
 import {ReplayController} from './ReplayController.js';
 import {
@@ -56,6 +58,14 @@ export class ReplayConnection {
     controller.setScriptFilter(
         script => !Bindings.IgnoreListManager.IgnoreListManager.instance().isUserIgnoreListedURL(
             script.sourceURL, {isContentScript: script.isContentScript()}));
+    controller.setBreakpointSourcesProvider(() => {
+      return Breakpoints.BreakpointManager.BreakpointManager.instance()
+          .allBreakpointLocations()
+          .filter(({breakpoint}) => breakpoint.enabled() && !breakpoint.isLogpoint())
+          .map(
+              ({uiLocation}) =>
+                  sourceKey(uiLocation.uiSourceCode.url(), uiLocation.uiSourceCode.contentType().isFromSourceMap()));
+    });
   }
 
   static instance(): ReplayConnection {

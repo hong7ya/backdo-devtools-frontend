@@ -37,7 +37,7 @@ const positionHighlightedState = CodeMirror.StateField.define<null|number>({
       if (effect.is(clearHighlightedPosition)) {
         pos = null;
       } else if (effect.is(setHighlightedPosition)) {
-        pos = Math.max(0, Math.min(effect.value, tr.newDoc.length - 1));
+        pos = Math.max(0, Math.min(effect.value, tr.newDoc.length));
       }
     }
     return pos;

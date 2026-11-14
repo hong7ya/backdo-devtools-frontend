@@ -18,16 +18,38 @@ const REPLAY_STALL_TIMEOUT_MS = 30_000;
 const USAGE_NOTIFICATION_INTERVAL_MS = 100;
 
 interface ConsoleInput {
+  type: 'console';
   expression: string;
   useCommandLineAPI: boolean;
   userGesture: boolean;
-  afterPosition: number;
+  exception?: string;
 }
 
 interface RecordedScript {
   url: string;
   positions: Set<string>;
   debuggerStatements: Set<string>;
+}
+
+export type BrowserInput = {
+  type: 'mouse',
+  params: Protocol.Input.DispatchMouseEventRequest,
+}|{type: 'key', params: Protocol.Input.DispatchKeyEventRequest}|{type: 'navigate', url: string}|
+    {type: 'reload', ignoreCache?: boolean, scriptToEvaluateOnLoad?: string}|{type: 'history', offset: number}|
+    {type: 'touch', enabled: boolean}|{type: 'viewport', width: number, height: number, deviceScaleFactor: number};
+
+type RecordedInput = (ConsoleInput|BrowserInput)&{
+  afterPosition: number,
+  afterInputs: number[],
+  sequence: number,
+  document: number,
+  loaded: boolean,
+  paused: boolean,
+};
+
+interface RecordingStart {
+  position: ExecutionPosition;
+  inputCount: number;
 }
 
 export const enum Events {
@@ -57,8 +79,24 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #recordingBreakpointIds = new Set<string>();
   #scripts = new Map<string, RecordedScript>();
   #consoleSources = new Map<string, Promise<string|null>>();
-  #consoleInputs: ConsoleInput[] = [];
+  #inputs: RecordedInput[] = [];
+  #consoleInputByMessage = new WeakMap<SDK.ConsoleModel.ConsoleMessage, RecordedInput&ConsoleInput>();
+  #completedInputs = new Set<number>();
+  #inputCompletions = new Set<number>();
   #activeConsoleInput: number|null = null;
+  #startURL: string|null = null;
+  #recordingStart: RecordingStart|null = null;
+  #document = 0;
+  #documentLoaded = true;
+  #documentEpoch = 0;
+  #preparingPause = false;
+  #pauseSequence = 0;
+  #browserTouchEnabled = false;
+  #browserViewport: Extract<BrowserInput, {type: 'viewport'}>|null = null;
+  #heldMouse = new Map<Protocol.Input.MouseButton, Protocol.Input.DispatchMouseEventRequest>();
+  #heldKeys = new Map<string, Protocol.Input.DispatchKeyEventRequest>();
+  #releaseHeldInputsOnExecution = false;
+  #entryBreakpoint: Protocol.Debugger.BreakpointId|null = null;
   #replayGeneration = 0;
   #replayInputCount = 0;
   #replayedPositions = 0;
@@ -85,7 +123,19 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   get inputCount(): number {
-    return this.#consoleInputs.length;
+    return this.#inputs.length;
+  }
+
+  get browserTouchEnabled(): boolean {
+    return this.#browserTouchEnabled;
+  }
+
+  get browserViewport(): {width: number, height: number, deviceScaleFactor: number}|null {
+    if (!this.#browserViewport) {
+      return null;
+    }
+    const {width, height, deviceScaleFactor} = this.#browserViewport;
+    return {width, height, deviceScaleFactor};
   }
 
   get calibrated(): boolean {
@@ -120,7 +170,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   get recordingUsage(): {positions: number, consoleInputs: number, breakpoints: number, pendingSources: number} {
     return {
       positions: this.session.history.length,
-      consoleInputs: this.#consoleInputs.length,
+      consoleInputs: this.#inputs.filter(input => input.type === 'console').length,
       breakpoints: this.#recordingBreakpointIds.size,
       pendingSources: this.#consoleSources.size,
     };
@@ -186,16 +236,20 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
     Common.EventTarget.removeEventListeners(this.#listeners);
     this.#debuggerModel?.setScriptExecutionPreparation(null);
+    this.#debuggerModel?.setPauseInterceptor(null);
+    this.#debuggerModel?.setExecutionInterceptor(null);
+    this.#documentEpoch++;
     this.#debuggerModel = model;
+    this.#browserTouchEnabled = false;
+    this.#browserViewport = null;
     this.#scriptsPrepared = false;
     this.#scriptExecutionBreakpoint = null;
+    this.#entryBreakpoint = null;
     this.#recordingBreakpointIds.clear();
     this.#scripts.clear();
     this.#consoleSources.clear();
     this.#activeConsoleInput = null;
-    model.setPauseInterceptor(details => this.#handlePause(details));
-    model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
-    model.setScriptExecutionPreparation(script => this.#prepareScriptExecution(script));
+    this.#installInterceptors(model);
     this.#observeTarget(model);
     if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
       this.fail(new Error('브레이크포인트를 활성화한 새 세션에서 기록을 시작하세요.'));
@@ -271,6 +325,72 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
   }
 
+  recordBrowserInput(input: BrowserInput, completion?: Promise<void>): void {
+    if (!this.#debuggerModel || this.busy) {
+      return;
+    }
+    if (this.session.error) {
+      if (input.type === 'touch' || input.type === 'viewport') {
+        this.#applyInputState(input);
+      }
+      return;
+    }
+    if (input.type === 'touch' && this.#browserTouchEnabled === input.enabled) {
+      return;
+    }
+    if (input.type === 'viewport' && this.#browserViewport && input.width === this.#browserViewport.width &&
+        input.height === this.#browserViewport.height &&
+        input.deviceScaleFactor === this.#browserViewport.deviceScaleFactor) {
+      return;
+    }
+    const recorded = this.#appendInput(input, Boolean(completion));
+    if (completion) {
+      const generation = this.#replayGeneration;
+      void completion.then(() => {
+        if (generation === this.#replayGeneration) {
+          this.#completeInput(recorded);
+        }
+      });
+    }
+    this.#applyInputState(input);
+  }
+
+  #appendInput(input: ConsoleInput|BrowserInput, pending = false): RecordedInput {
+    this.#startURL ??=
+        this.#debuggerModel?.target().model(SDK.ResourceTreeModel.ResourceTreeModel)?.mainFrame?.url ?? null;
+    const recorded = {
+      ...input,
+      afterPosition: this.session.history.length,
+      afterInputs: [...this.#inputCompletions],
+      sequence: this.#inputs.length,
+      document: this.#document,
+      loaded: this.#documentLoaded,
+      paused: this.#preparingPause || Boolean(this.#debuggerModel?.isPaused()),
+    };
+    this.#inputCompletions.clear();
+    this.#inputs.push(recorded);
+    if (!pending) {
+      this.#completeInput(recorded);
+    }
+    return recorded;
+  }
+
+  #completeInput(input: RecordedInput): void {
+    // 이동 ACK가 다음 입력보다 먼저 도착했다면 그 순서도 보존한다.
+    // press/release/key ACK는 터치·일시정지 중 도착하지 않을 수 있어 장벽으로 쓰지 않는다.
+    if (input.type === 'key' ||
+        (input.type === 'mouse' && input.params.type !== Protocol.Input.DispatchMouseEventRequestType.MouseMoved) ||
+        this.#inputs[input.sequence] !== input) {
+      return;
+    }
+    if (this.#completedInputs.has(input.sequence)) {
+      return;
+    }
+    this.#completedInputs.add(input.sequence);
+    this.#inputCompletions.add(input.sequence);
+    this.#notifyProgress();
+  }
+
   fail(error: unknown): void {
     if (this.session.error) {
       return;
@@ -291,14 +411,69 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
 
   #observeTarget(model: SDK.DebuggerModel.DebuggerModel): void {
     this.#listeners.push(model.addEventListener(SDK.DebuggerModel.Events.GlobalObjectCleared, () => {
-      if (!this.#isReplaying) {
+      this.#calibrationAbort?.abort();
+      this.#calibrationAbort = null;
+      this.#preparingPause = false;
+      if (model.target().type() === SDK.Target.Type.NODE && !this.#isReplaying) {
         this.#releaseRecording();
         this.session.reset();
-        model.setPauseInterceptor(details => this.#handlePause(details));
-        model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
-        this.#notifyStatusChanged();
+      } else {
+        // 새 문서는 같은 사용자 기록의 다음 구간이다. 문서에 속한 ID만 버린다.
+        this.#documentEpoch++;
+        this.#scripts.clear();
+        this.#consoleSources.clear();
+        this.#activeConsoleInput = null;
+        this.#recordingBreakpointIds.clear();
+        if (this.#entryBreakpoint) {
+          this.#recordingBreakpointIds.add(this.#entryBreakpoint);
+        }
+        this.#lastPosition = null;
+        this.session.unrecordedPause();
       }
+      this.#installInterceptors(model);
+      this.#notifyProgress();
+      this.#notifyStatusChanged();
     }));
+    const resources = model.target().model(SDK.ResourceTreeModel.ResourceTreeModel);
+    if (resources) {
+      this.#listeners.push(resources.addEventListener(SDK.ResourceTreeModel.Events.WillReloadPage, event => {
+        if (this.busy) {
+          this.fail(new Error('복원 중 페이지를 새로고침하여 재실행을 중단했습니다.'));
+          return;
+        }
+        if (!Common.Settings.Settings.instance().moduleSetting('breakpoints-active').get()) {
+          return;
+        }
+        if (this.session.error) {
+          // 실패한 실행은 이어 붙이지 않는다. 사용자가 페이지를 다시 로드하면 새 기록을 시작한다.
+          this.#releaseRecording();
+          this.session.reset();
+          this.#installInterceptors(model);
+          this.#documentLoaded = false;
+          // 같은 대상의 viewport와 터치 설정은 새 문서에서도 그대로 적용된다.
+          if (this.#browserViewport) {
+            this.#appendInput(this.#browserViewport);
+          }
+          if (this.#browserTouchEnabled) {
+            this.#appendInput({type: 'touch', enabled: true});
+          }
+        }
+        this.recordBrowserInput({type: 'reload', ...(event.data ?? {})});
+        this.#notifyStatusChanged();
+      }));
+      this.#listeners.push(resources.addEventListener(SDK.ResourceTreeModel.Events.FrameNavigated, event => {
+        if (!event.data.isMainFrame()) {
+          return;
+        }
+        this.#document++;
+        this.#documentLoaded = event.data.backForwardCacheDetails.restoredFromCache === true;
+        this.#notifyProgress();
+      }));
+      this.#listeners.push(resources.addEventListener(SDK.ResourceTreeModel.Events.Load, () => {
+        this.#documentLoaded = true;
+        this.#notifyProgress();
+      }));
+    }
     const breakpoints = Common.Settings.Settings.instance().moduleSetting('breakpoints-active');
     this.#listeners.push(breakpoints.addChangeListener(() => {
       if (!breakpoints.get()) {
@@ -326,7 +501,21 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.#listeners.push(consoleModel.addEventListener(SDK.ConsoleModel.Events.CommandWillBeEvaluated, event => {
         this.#recordConsoleInput(event.data);
       }));
+      this.#listeners.push(consoleModel.addEventListener(SDK.ConsoleModel.Events.CommandEvaluated, event => {
+        const input = this.#consoleInputByMessage.get(event.data.commandMessage);
+        if (input) {
+          input.exception = consoleExceptionMessage(event.data.exceptionDetails);
+          this.#completeInput(input);
+          this.#consoleInputByMessage.delete(event.data.commandMessage);
+        }
+      }));
     }
+  }
+
+  #installInterceptors(model: SDK.DebuggerModel.DebuggerModel): void {
+    model.setPauseInterceptor(details => this.#handlePause(details));
+    model.setExecutionInterceptor(command => this.#handleExecutionCommand(command));
+    model.setScriptExecutionPreparation(script => this.#prepareScriptExecution(script));
   }
 
   #recordConsoleInput(command: SDK.ConsoleModel.ConsoleCommand): void {
@@ -342,8 +531,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       return;
     }
     const {expression, useCommandLineAPI, userGesture} = command;
-    this.#activeConsoleInput = this.#consoleInputs.length;
-    this.#consoleInputs.push({expression, useCommandLineAPI, userGesture, afterPosition: this.session.history.length});
+    this.#activeConsoleInput = this.#inputs.length;
+    const input =
+        this.#appendInput({type: 'console', expression, useCommandLineAPI, userGesture}, true) as RecordedInput &
+        ConsoleInput;
+    this.#consoleInputByMessage.set(command.commandMessage, input);
     this.#notifyStatusChanged();
   }
 
@@ -355,8 +547,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (index === null) {
       return;
     }
-    const input = this.#consoleInputs[index];
-    if (!input) {
+    const input = this.#inputs[index];
+    if (!input || input.type !== 'console') {
       return;
     }
     // VM 번호와 scriptId는 재연결마다 달라진다. 원문이 일치하는 입력 순번으로 비교한다.
@@ -380,6 +572,15 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#isReplaying = true;
     this.#replayedPositions = 0;
     this.#replayInputCount = 0;
+    this.#document = 0;
+    this.#documentLoaded = true;
+    this.#browserTouchEnabled = false;
+    this.#browserViewport = null;
+    this.#heldMouse.clear();
+    this.#heldKeys.clear();
+    this.#releaseHeldInputsOnExecution = false;
+    this.#completedInputs.clear();
+    this.#inputCompletions.clear();
     this.#notifyStatusChanged();
     const promise = new Promise<void>((resolve, reject) => {
       this.#resolveReplay = resolve;
@@ -403,17 +604,27 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #restartAndReplay(completed: Promise<void>): Promise<void> {
+    const generation = this.#replayGeneration;
     const ws = await this.#restartTarget?.();
+    if (generation !== this.#replayGeneration) {
+      return;
+    }
     if (!ws || this.session.error) {
       throw new Error(this.session.error ?? '재시작한 대상의 연결 주소가 없습니다.');
     }
     await this.#connectToTarget?.(ws);
+    if (generation !== this.#replayGeneration) {
+      return;
+    }
     if (this.session.error) {
       throw new Error(this.session.error);
     }
+    await this.#restoreStart();
+    if (generation !== this.#replayGeneration || !this.session.replaying) {
+      return;
+    }
     // 콘솔 원문도 실행 입력이다. 변수·힙을 저장하지 않고 같은 순서로 다시 제출한다.
-    const generation = this.#replayGeneration;
-    void this.#replayConsoleInputs(generation).catch(error => {
+    void this.#replayInputs(generation).catch(error => {
       if (generation === this.#replayGeneration && this.session.replaying) {
         this.fail(error);
       }
@@ -421,44 +632,285 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     await completed;
   }
 
-  async #replayConsoleInputs(generation: number): Promise<void> {
-    const runtime = this.#debuggerModel?.target().runtimeAgent();
-    if (!runtime) {
-      throw new Error('콘솔 코드를 실행할 대상이 없습니다.');
+  async #restoreStart(): Promise<void> {
+    const start = this.#recordingStart;
+    const model = this.#debuggerModel;
+    if (!start || !model || model.target().type() === SDK.Target.Type.NODE) {
+      return;
     }
-    for (let index = 0; index < this.#consoleInputs.length; index++) {
-      const input = this.#consoleInputs[index];
-      await this.#waitForInputPosition(input.afterPosition, generation);
-      if (generation !== this.#replayGeneration || !this.session.replaying || this.session.error) {
+    const generation = this.#replayGeneration;
+    const {url, hash, lineNumber, columnNumber} = start.position;
+    const breakpoint = await model.agent.invoke_setBreakpointByUrl({
+      ...(url.startsWith('backdo-console:///') ? {scriptHash: hash} : {url}),
+      lineNumber,
+      columnNumber,
+    });
+    if (breakpoint.getError()) {
+      throw new Error(breakpoint.getError());
+    }
+    if (generation !== this.#replayGeneration || !this.session.replaying) {
+      await model.agent.invoke_removeBreakpoint({breakpointId: breakpoint.breakpointId});
+      return;
+    }
+    this.#entryBreakpoint = breakpoint.breakpointId;
+    this.#recordingBreakpointIds.add(breakpoint.breakpointId);
+    if (this.#startURL && this.#startURL !== 'about:blank') {
+      // 연결 전에 이미 열린 페이지가 있었다면 그것만 시작점으로 복원한다.
+      // 이후 주소 입력·링크 클릭은 입력 로그에서 각각 한 번만 실행한다.
+      this.#document = -1;
+      this.#documentLoaded = false;
+      const response = await model.target().pageAgent().invoke_navigate({url: this.#startURL});
+      if (response.getError() || response.errorText) {
+        throw new Error(response.getError() || response.errorText);
+      }
+    }
+  }
+
+  async #replayInputs(generation: number): Promise<void> {
+    for (let index = 0; index < this.#inputs.length; index++) {
+      const input = this.#inputs[index];
+      await this.#waitForInput(input, generation);
+      if (!this.#replayActive(generation)) {
         return;
       }
-      this.#activeConsoleInput = index;
-      this.#replayInputCount = index + 1;
-      const response = await runtime.invoke_evaluate({
+      const submitted = Promise.withResolvers<void>();
+      const onSent = (): void => {
+        if (input.type === 'console') {
+          this.#activeConsoleInput = index;
+        }
+        this.#replayInputCount = index + 1;
+        for (const completed of input.afterInputs) {
+          this.#inputCompletions.delete(completed);
+        }
+        this.#applyInputState(input);
+        submitted.resolve();
+        this.#notifyProgress();
+      };
+      // 원본에서 완료된 입력만 장벽으로 삼는다. debugger 때문에 미완료였던
+      // press/evaluate는 다음 release 등을 막지 않고 실제 전송 순서만 보존한다.
+      void this.#dispatchInput(input, generation, onSent)
+          .then(() => {
+            if (generation === this.#replayGeneration) {
+              this.#completeInput(input);
+            }
+          })
+          .catch(error => {
+            if (this.#replayActive(generation)) {
+              this.fail(error);
+            }
+          })
+          .finally(() => submitted.resolve());
+      await submitted.promise;
+    }
+  }
+
+  #replayActive(generation: number): boolean {
+    return generation === this.#replayGeneration && this.session.replaying && !this.session.error;
+  }
+
+  async #waitForInput(input: RecordedInput, generation: number): Promise<void> {
+    while (this.#replayActive(generation) &&
+           ((!input.paused && this.#preparingPause && !this.#waitingForEntryInput(input)) ||
+            input.afterInputs.some(index => !this.#completedInputs.has(index)) ||
+            this.#replayedPositions < input.afterPosition || this.#document < input.document ||
+            (input.loaded && !this.#documentLoaded))) {
+      await new Promise<void>(resolve => this.#progressListeners.add(resolve));
+    }
+    if (this.#replayActive(generation) &&
+        (this.#replayedPositions !== input.afterPosition || this.#document !== input.document)) {
+      throw new Error('입력 시점이 기록된 문서·실행 순서와 달라졌습니다.');
+    }
+  }
+
+  #waitingForEntryInput(input: RecordedInput): boolean {
+    return Boolean(
+        this.#entryBreakpoint && input.sequence < (this.#recordingStart?.inputCount ?? 0) &&
+        input.afterPosition === 0 && input.document === this.#document && input.type !== 'console');
+  }
+
+  async #dispatchInput(input: RecordedInput, generation: number, onSent: () => void = () => {}): Promise<void> {
+    const target = this.#debuggerModel?.target();
+    const epoch = this.#documentEpoch;
+    if (!target) {
+      throw new Error('입력을 실행할 대상이 없습니다.');
+    }
+    if (this.#replayActive(generation) && this.#browserTouchEnabled && !input.paused && input.type === 'mouse' &&
+        input.params.type === Protocol.Input.DispatchMouseEventRequestType.MousePressed) {
+      // Chrome 133에서는 로드 직후 compositor 갱신 전 첫 터치가 누락될 수 있다.
+      // 좌표계를 바꾸지 않는 화면 readback 완료를 기다리고 이미지 데이터는 버린다.
+      const frame = await target.pageAgent().invoke_captureScreenshot({
+        format: Protocol.Page.CaptureScreenshotRequestFormat.Jpeg,
+        quality: 0,
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      if (frame.getError()) {
+        throw new Error(frame.getError());
+      }
+      await this.#waitForInput(input, generation);
+      if (!this.#replayActive(generation)) {
+        return;
+      }
+    }
+    if (input.type !== 'history') {
+      onSent();
+    }
+    if (input.type === 'console') {
+      const response = await target.runtimeAgent().invoke_evaluate({
         expression: input.expression,
         includeCommandLineAPI: input.useCommandLineAPI,
         userGesture: input.userGesture,
         objectGroup: 'console',
         replMode: true,
         awaitPromise: false,
+        allowUnsafeEvalBlockedByCSP: false,
       });
-      // 직전 복원의 evaluate 응답은 다음 재시작에서 취소될 수 있다. 새 작업에는 섞지 않는다.
       if (generation !== this.#replayGeneration) {
+        return;
+      }
+      if (epoch !== this.#documentEpoch) {
         return;
       }
       if (response.getError() && this.session.replaying) {
         throw new Error(response.getError());
       }
+      const exception = consoleExceptionMessage(response.exceptionDetails);
+      if (!this.session.replaying) {
+        input.exception = exception;
+      } else if (exception !== input.exception) {
+        throw new Error(`Console 입력의 실행 결과가 달라졌습니다: ${exception ?? '기존 예외가 발생하지 않았습니다.'}`);
+      }
+      return;
+    }
+    let response: {getError(): string|undefined}|undefined;
+    switch (input.type) {
+      case 'mouse':
+        response = await target.inputAgent().invoke_dispatchMouseEvent(input.params);
+        break;
+      case 'key':
+        response = await target.inputAgent().invoke_dispatchKeyEvent(input.params);
+        break;
+      case 'navigate': {
+        const navigation = await target.pageAgent().invoke_navigate({url: input.url});
+        if (navigation.errorText && this.#replayActive(generation)) {
+          throw new Error(navigation.errorText);
+        }
+        response = navigation;
+        break;
+      }
+      case 'reload':
+        response = await target.pageAgent().invoke_reload({
+          ignoreCache: input.ignoreCache,
+          scriptToEvaluateOnLoad: input.scriptToEvaluateOnLoad,
+        });
+        break;
+      case 'history': {
+        const history = await target.pageAgent().invoke_getNavigationHistory();
+        if (!this.#replayActive(generation)) {
+          return;
+        }
+        const entry = history.entries?.[history.currentIndex + input.offset];
+        if (history.getError() || !entry) {
+          throw new Error(history.getError() || '재생할 방문 기록이 없습니다.');
+        }
+        onSent();
+        response = await target.pageAgent().invoke_navigateToHistoryEntry({entryId: entry.id});
+        break;
+      }
+      case 'touch':
+        await target.model(SDK.EmulationModel.EmulationModel)?.overrideEmulateTouch(input.enabled);
+        break;
+      case 'viewport':
+        response = await target.emulationAgent().invoke_setDeviceMetricsOverride({
+          width: input.width,
+          height: input.height,
+          deviceScaleFactor: input.deviceScaleFactor,
+          mobile: false,
+        });
+        break;
+    }
+    if (response?.getError() && epoch === this.#documentEpoch && this.#replayActive(generation)) {
+      throw new Error(response.getError());
     }
   }
 
-  async #waitForInputPosition(position: number, generation: number): Promise<void> {
-    while (generation === this.#replayGeneration && this.session.replaying && !this.session.error &&
-           this.#replayedPositions < position) {
-      await new Promise<void>(resolve => this.#progressListeners.add(resolve));
+  #applyInputState(input: ConsoleInput|BrowserInput): void {
+    if (input.type === 'touch') {
+      this.#browserTouchEnabled = input.enabled;
+    } else if (input.type === 'viewport') {
+      this.#browserViewport = input;
+    } else if (input.type === 'mouse') {
+      const button = input.params.button ?? Protocol.Input.MouseButton.None;
+      if (input.params.type === Protocol.Input.DispatchMouseEventRequestType.MousePressed) {
+        this.#heldMouse.set(button, input.params);
+      } else if (input.params.type === Protocol.Input.DispatchMouseEventRequestType.MouseReleased) {
+        this.#heldMouse.delete(button);
+      }
+      for (const [held, params] of this.#heldMouse) {
+        this.#heldMouse.set(held, {...params, x: input.params.x, y: input.params.y});
+      }
+    } else if (input.type === 'key') {
+      const key = input.params.code ?? String(input.params.windowsVirtualKeyCode);
+      if (input.params.type === Protocol.Input.DispatchKeyEventRequestType.KeyUp) {
+        this.#heldKeys.delete(key);
+      } else if (input.params.type !== Protocol.Input.DispatchKeyEventRequestType.Char) {
+        this.#heldKeys.set(key, input.params);
+      }
     }
-    if (generation === this.#replayGeneration && this.session.replaying && this.#replayedPositions !== position) {
-      throw new Error('콘솔 입력 시점이 기록된 실행 순서와 달라졌습니다.');
+  }
+
+  #finishInputReplay(): void {
+    this.#inputs.splice(this.#replayInputCount);
+    this.#completedInputs = new Set([...this.#completedInputs].filter(index => index < this.#inputs.length));
+    this.#inputCompletions = new Set([...this.#inputCompletions].filter(index => index < this.#inputs.length));
+    this.#releaseHeldInputsOnExecution = true;
+  }
+
+  #releaseHeldInputs(): void {
+    if (!this.#releaseHeldInputsOnExecution) {
+      return;
+    }
+    this.#releaseHeldInputsOnExecution = false;
+    const releases: BrowserInput[] = [];
+    const remainingKeys = new Map(this.#heldKeys);
+    const modifiersForHeldKeys = (): number => [...remainingKeys.values()].reduce(
+        (bits, params) => bits | keyModifierMask(params.code ?? ''), 0);
+    let buttons = [...this.#heldMouse.keys()].reduce((bits, button) => bits | mouseButtonMask(button), 0);
+    for (const [button, params] of this.#heldMouse) {
+      buttons &= ~mouseButtonMask(button);
+      releases.push({
+        type: 'mouse',
+        params: {
+          ...params,
+          type: Protocol.Input.DispatchMouseEventRequestType.MouseReleased,
+          buttons,
+          modifiers: modifiersForHeldKeys()
+        }
+      });
+    }
+    for (const [key, params] of this.#heldKeys) {
+      remainingKeys.delete(key);
+      const modifiers = modifiersForHeldKeys();
+      releases.push(
+          {type: 'key', params: {...params, type: Protocol.Input.DispatchKeyEventRequestType.KeyUp, modifiers}});
+    }
+    // 미래 조작을 재생하지 않는다. 현재 좌표에서 아직 눌린 입력만 새 분기의
+    // 첫 입력으로 해제한다. 사용자가 이미 직접 해제했다면 Map에 남아 있지 않다.
+    const generation = this.#replayGeneration;
+    for (const release of releases) {
+      const input = this.#appendInput(release, true);
+      this.#applyInputState(release);
+      void this.#dispatchInput(input, generation)
+          .then(() => {
+            if (generation === this.#replayGeneration) {
+              this.#completeInput(input);
+            }
+          })
+          .catch(error => {
+            if (generation === this.#replayGeneration) {
+              this.fail(error);
+            }
+          });
     }
   }
 
@@ -466,18 +918,33 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (isInternalScript(script)) {
       return null;
     }
+    const epoch = this.#documentEpoch;
     const recorded = this.#scripts.get(script.scriptId);
     if (recorded) {
       return recorded;
     }
     let url = await this.#consoleSources.get(script.scriptId);
+    if (epoch !== this.#documentEpoch || script.debuggerModel !== this.#debuggerModel) {
+      return null;
+    }
     if (!url && script.sourceURL && this.#scriptFilter(script)) {
       url = script.sourceURL;
     }
     if (!url) {
       return null;
     }
-    const result = await this.#installRecordingBreakpoints(script, url);
+    let result: RecordedScript;
+    try {
+      result = await this.#installRecordingBreakpoints(script, url, epoch);
+    } catch (error) {
+      if (epoch !== this.#documentEpoch || script.debuggerModel !== this.#debuggerModel) {
+        return null;
+      }
+      throw error;
+    }
+    if (epoch !== this.#documentEpoch || script.debuggerModel !== this.#debuggerModel) {
+      return null;
+    }
     this.#scripts.set(script.scriptId, result);
     return result;
   }
@@ -494,9 +961,17 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (response.getError()) {
       throw new Error(response.getError());
     }
+    if (model !== this.#debuggerModel) {
+      void model.agent.invoke_removeBreakpoint({breakpointId: response.breakpointId});
+      return;
+    }
     this.#scriptExecutionBreakpoint = response.breakpointId;
     // 이미 불러온 모듈은 최초 정지에서, 나중에 불러오는 모듈은 실행 직전에 준비한다.
+    const epoch = this.#documentEpoch;
     for (const script of model.scripts()) {
+      if (epoch !== this.#documentEpoch || model !== this.#debuggerModel) {
+        break;
+      }
       await this.#recordedScript(script);
     }
   }
@@ -512,7 +987,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
   }
 
-  async #installRecordingBreakpoints(script: SDK.Script.Script, url: string): Promise<RecordedScript> {
+  async #installRecordingBreakpoints(script: SDK.Script.Script, url: string, epoch: number): Promise<RecordedScript> {
     const model = script.debuggerModel;
     const result = await model.agent.invoke_getPossibleBreakpoints({
       start: {scriptId: script.scriptId, lineNumber: script.lineOffset, columnNumber: script.columnOffset},
@@ -527,12 +1002,16 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     const debuggerStatements = new Set<string>();
     const resolvedPositions = new Map<string, string>();
     for (const location of result.locations) {
+      if (epoch !== this.#documentEpoch || model !== this.#debuggerModel) {
+        break;
+      }
       const requestedKey = positionKey(location);
       let actualKey = resolvedPositions.get(requestedKey);
       if (!actualKey) {
         // 앞선 후보가 이 위치로 보정되었다면 이미 설치한 중단점을 사용한다.
-        actualKey = positions.has(requestedKey) ? requestedKey :
-                                                  await this.#installRecordingBreakpoint(script, location, positions);
+        actualKey = positions.has(requestedKey) ?
+            requestedKey :
+            await this.#installRecordingBreakpoint(script, location, positions, epoch);
         resolvedPositions.set(requestedKey, actualKey);
       }
       if (location.type === Protocol.Debugger.BreakLocationType.DebuggerStatement) {
@@ -543,9 +1022,16 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   }
 
   async #installRecordingBreakpoint(
-      script: SDK.Script.Script, location: Protocol.Debugger.Location, positions: Set<string>): Promise<string> {
+      script: SDK.Script.Script, location: Protocol.Debugger.Location, positions: Set<string>,
+      epoch: number): Promise<string> {
     const agent = script.debuggerModel.agent;
     const breakpoint = await agent.invoke_setBreakpoint({location});
+    if (epoch !== this.#documentEpoch || script.debuggerModel !== this.#debuggerModel) {
+      if (breakpoint.breakpointId) {
+        void agent.invoke_removeBreakpoint({breakpointId: breakpoint.breakpointId});
+      }
+      return positionKey(location);
+    }
     const error = breakpoint.getError();
     if (error) {
       throw new Error(error);
@@ -576,12 +1062,46 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     if (this.session.error) {
       return false;
     }
+    const generation = this.#replayGeneration;
+    const inputCountAtPause = this.#inputs.length;
+    const modelAtPause = this.#debuggerModel;
+    const epochAtPause = this.#documentEpoch;
+    const pauseSequence = ++this.#pauseSequence;
+    this.#preparingPause = true;
     try {
-      const generation = this.#replayGeneration;
       if (!this.#isReplaying && !this.session.history.length) {
         await this.#prepareTarget?.();
       }
+      if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel) {
+        return true;
+      }
       const frame = details.callFrames[0];
+      if (this.#entryBreakpoint) {
+        if (!details.breakpointIds.includes(this.#entryBreakpoint)) {
+          await this.#resumeExecution();
+          return true;
+        }
+        // 첫 정지 통지보다 먼저 보냈던 press/release를 모두 제출할 때까지
+        // 이 시작점을 유지한다. 전송 지연 때문에 유일한 시작점을 지나치지 않는다.
+        this.#notifyProgress();
+        while (this.#replayActive(generation) && this.#replayInputCount < (this.#recordingStart?.inputCount ?? 0)) {
+          await new Promise<void>(resolve => this.#progressListeners.add(resolve));
+        }
+        if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel ||
+            !this.#replayActive(generation)) {
+          return true;
+        }
+        const breakpointId = this.#entryBreakpoint;
+        const removed = await this.#debuggerModel?.agent.invoke_removeBreakpoint({breakpointId});
+        if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel) {
+          return true;
+        }
+        if (removed?.getError()) {
+          throw new Error(removed.getError());
+        }
+        this.#entryBreakpoint = null;
+        this.#recordingBreakpointIds.delete(breakpointId);
+      }
       const initial = frame && !this.#scripts.has(frame.script.scriptId);
       await this.#prepareRecordingScripts();
       // 시작 정지가 Ignore List의 모듈에 있어도 재시작의 기준점으로만 보관한다.
@@ -589,6 +1109,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       let script = frame && await this.#recordedScript(frame.script);
       if (!script && frame && breakOnStart && !isInternalScript(frame.script)) {
         script = {url: frame.script.sourceURL, positions: new Set(), debuggerStatements: new Set()};
+      }
+      if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel) {
+        return true;
       }
       if (generation !== this.#replayGeneration || this.session.error) {
         return false;
@@ -605,6 +1128,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const {lineNumber, columnNumber} = frame.location();
       const key = positionKey({lineNumber, columnNumber});
       const position = {url: script.url, hash: frame.script.hash, lineNumber, columnNumber};
+      if (!this.#isReplaying && !this.session.history.length) {
+        this.#startURL ??=
+            this.#debuggerModel?.target().model(SDK.ResourceTreeModel.ResourceTreeModel)?.mainFrame?.url ?? null;
+        this.#recordingStart = {position, inputCount: inputCountAtPause};
+      }
       const hitRecordingBreakpoint = details.breakpointIds.some(id => this.#recordingBreakpointIds.has(id));
       // Node의 시작 정지는 일반 중단점이 없는 import 앞에도 오며, --inspect-brk 재시작으로 재현된다.
       if (!initial && !breakOnStart && !hitRecordingBreakpoint && !script.debuggerStatements.has(key)) {
@@ -631,6 +1159,12 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         userVisible: Boolean(initial) || script.debuggerStatements.has(key) || !onlyRecordingBreakpoint,
       });
       this.#lastPosition = position;
+      if (!this.#isReplaying) {
+        // pause 준비를 기다리는 동안 들어온 release도 현재 정지에 연결한다.
+        for (const input of this.#inputs.slice(inputCountAtPause)) {
+          input.afterPosition = this.session.history.length;
+        }
+      }
       if (!this.#isReplaying && this.session.history.canReverse &&
           (this.#timing.estimate(this.session.history.length) ?? 0) >= REPLAY_RESPONSE_BUDGET_MS) {
         throw new Error(REPLAY_TIME_LIMIT_MESSAGE);
@@ -638,11 +1172,16 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (this.#isReplaying) {
         this.#replayedPositions++;
         if (!this.session.replaying) {
-          this.#consoleInputs.splice(this.#replayInputCount);
+          this.#finishInputReplay();
         }
       }
       this.#notifyUsageChanged();
       if (disposition === 'continue') {
+        await this.#flushInputsAtPause(generation);
+        if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel ||
+            generation !== this.#replayGeneration) {
+          return true;
+        }
         await this.#resumeExecution();
         return true;
       }
@@ -650,8 +1189,17 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.#notifyStatusChanged();
       return false;
     } catch (error) {
+      if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel ||
+          generation !== this.#replayGeneration) {
+        return true;
+      }
       this.fail(error);
       return false;
+    } finally {
+      if (epochAtPause === this.#documentEpoch && pauseSequence === this.#pauseSequence) {
+        this.#preparingPause = false;
+        this.#notifyProgress();
+      }
     }
   }
 
@@ -666,6 +1214,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       this.fail(new Error('모든 정지 건너뛰기로 실행 기록이 끊겼습니다.'));
       return false;
     }
+    if (command !== 'pause') {
+      this.#releaseHeldInputs();
+    }
     const useNativeCommand = this.#debuggerModel?.isPaused() && !this.session.atRecordedPause;
     this.session.beginExecution(command);
     this.#notifyStatusChanged();
@@ -678,6 +1229,18 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       void this.#resumeExecution().catch(error => this.fail(error));
     }
     return true;
+  }
+
+  async #flushInputsAtPause(generation: number): Promise<void> {
+    this.#notifyProgress();
+    while (this.#replayActive(generation)) {
+      const next = this.#inputs[this.#replayInputCount];
+      if (!next || !next.paused || next.afterPosition !== this.#replayedPositions || next.document !== this.#document ||
+          (next.loaded && !this.#documentLoaded)) {
+        return;
+      }
+      await new Promise<void>(resolve => this.#progressListeners.add(resolve));
+    }
   }
 
   async #resumeExecution(): Promise<void> {
@@ -694,10 +1257,22 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     this.#timing = new ReplayTiming();
     this.#replayGeneration++;
     this.session.history.clear();
-    this.#consoleInputs = [];
+    this.#inputs = [];
+    this.#consoleInputByMessage = new WeakMap();
     this.#consoleSources.clear();
     this.#scripts.clear();
     this.#activeConsoleInput = null;
+    this.#startURL = null;
+    this.#recordingStart = null;
+    this.#document = 0;
+    this.#documentLoaded = true;
+    this.#documentEpoch++;
+    this.#heldMouse.clear();
+    this.#heldKeys.clear();
+    this.#releaseHeldInputsOnExecution = false;
+    this.#completedInputs.clear();
+    this.#inputCompletions.clear();
+    this.#entryBreakpoint = null;
     this.#lastPosition = null;
     this.#scriptsPrepared = false;
     if (this.#scriptExecutionBreakpoint) {
@@ -742,6 +1317,43 @@ function isInternalScript(script: SDK.Script.Script): boolean {
   return script.sourceURL.startsWith('backdo-internal:///');
 }
 
+function consoleExceptionMessage(details?: Protocol.Runtime.ExceptionDetails): string|undefined {
+  return details ? (details.exception?.description || details.text).split('\n')[0] : undefined;
+}
+
 function positionKey(location: {lineNumber: number, columnNumber?: number}): string {
   return `${location.lineNumber}:${location.columnNumber ?? 0}`;
+}
+
+function mouseButtonMask(button: Protocol.Input.MouseButton): number {
+  switch (button) {
+    case Protocol.Input.MouseButton.Left:
+      return 1;
+    case Protocol.Input.MouseButton.Right:
+      return 2;
+    case Protocol.Input.MouseButton.Middle:
+      return 4;
+    case Protocol.Input.MouseButton.Back:
+      return 8;
+    case Protocol.Input.MouseButton.Forward:
+      return 16;
+    default:
+      return 0;
+  }
+}
+
+function keyModifierMask(code: string): number {
+  if (code.startsWith('Alt')) {
+    return 1;
+  }
+  if (code.startsWith('Control')) {
+    return 2;
+  }
+  if (code.startsWith('Meta')) {
+    return 4;
+  }
+  if (code.startsWith('Shift')) {
+    return 8;
+  }
+  return 0;
 }

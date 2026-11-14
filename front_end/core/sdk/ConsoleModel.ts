@@ -179,6 +179,7 @@ export class ConsoleModel extends SDKModel<EventTypes> {
       useCommandLineAPI: boolean): Promise<void> {
     // 실행이 debugger 문에서 멈추기 전에 콘솔 입력을 기록할 수 있게 알린다.
     this.dispatchEventToListeners(Events.CommandWillBeEvaluated, {
+      commandMessage: originatingMessage,
       executionContext,
       expression,
       useCommandLineAPI,
@@ -526,6 +527,7 @@ export enum Events {
 }
 
 export interface ConsoleCommand {
+  commandMessage: ConsoleMessage;
   executionContext: ExecutionContext;
   expression: string;
   useCommandLineAPI: boolean;

@@ -34,6 +34,7 @@ import * as i18n from '../../core/i18n/i18n.js';
 import type * as Platform from '../../core/platform/platform.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
+import type {BrowserInput} from '../../models/replay/ReplayController.js';
 import * as IconButton from '../../ui/components/icon_button/icon_button.js';
 import * as UI from '../../ui/legacy/legacy.js';
 
@@ -86,6 +87,8 @@ interface Point {
   y: number;
 }
 
+type BrowserViewport = Omit<Extract<BrowserInput, {type: 'viewport'}>, 'type'>;
+
 export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.Highlighter {
   private readonly screenCaptureModel: SDK.ScreenCaptureModel.ScreenCaptureModel;
   private domModel: SDK.DOMModel.DOMModel|null;
@@ -93,6 +96,12 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   private resourceTreeModel: SDK.ResourceTreeModel.ResourceTreeModel|null;
   private networkManager: SDK.NetworkManager.NetworkManager|null;
   private readonly inputModel: InputModel|null;
+  private readonly recordBrowserInput: (input: BrowserInput) => void;
+  private browserViewport: BrowserViewport|null = null;
+  private viewportCapture: Promise<void>|null = null;
+  private touchEnabled = false;
+  private disposed = false;
+  private readonly modelListeners: Common.EventTarget.EventDescriptor[] = [];
   private shortcuts: {[x: number]: (arg0?: Event|undefined) => boolean};
   private scrollOffsetX: number;
   private scrollOffsetY: number;
@@ -136,7 +145,9 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   private mouseInputToggleIcon?: IconButton.Icon.Icon;
   private historyIndex?: number;
   private historyEntries?: Protocol.Page.NavigationEntry[];
-  constructor(screenCaptureModel: SDK.ScreenCaptureModel.ScreenCaptureModel) {
+  constructor(
+      screenCaptureModel: SDK.ScreenCaptureModel.ScreenCaptureModel,
+      recordBrowserInput: (input: BrowserInput) => void) {
     super();
     this.registerRequiredCSS(screencastViewStyles);
     this.screenCaptureModel = screenCaptureModel;
@@ -145,6 +156,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     this.resourceTreeModel = screenCaptureModel.target().model(SDK.ResourceTreeModel.ResourceTreeModel);
     this.networkManager = screenCaptureModel.target().model(SDK.NetworkManager.NetworkManager);
     this.inputModel = screenCaptureModel.target().model(InputModel);
+    this.recordBrowserInput = recordBrowserInput;
 
     this.setMinimumSize(150, 150);
 
@@ -198,17 +210,27 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     this.shortcuts[UI.KeyboardShortcut.KeyboardShortcut.makeKey('l', UI.KeyboardShortcut.Modifiers.Ctrl.value)] =
         this.focusNavigationBar.bind(this);
 
-    SDK.TargetManager.TargetManager.instance().addEventListener(
-        SDK.TargetManager.Events.SUSPEND_STATE_CHANGED, this.onSuspendStateChange, this);
+    this.modelListeners.push(SDK.TargetManager.TargetManager.instance().addEventListener(
+        SDK.TargetManager.Events.SUSPEND_STATE_CHANGED, this.onSuspendStateChange, this));
     this.updateGlasspane();
+    void this.captureViewport();
   }
 
   override willHide(): void {
     this.stopCasting();
   }
 
+  dispose(): void {
+    this.disposed = true;
+    clearTimeout(this.deferredCasting);
+    Common.EventTarget.removeEventListeners(this.modelListeners);
+    this.navigationProgressBar?.dispose();
+    this.stopCasting();
+    this.detach();
+  }
+
   private startCasting(): void {
-    if (SDK.TargetManager.TargetManager.instance().allTargetsSuspended()) {
+    if (this.disposed || SDK.TargetManager.TargetManager.instance().allTargetsSuspended()) {
       return;
     }
     if (this.isCasting) {
@@ -232,6 +254,11 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     if (this.overlayModel) {
       this.overlayModel.setHighlighter(this);
     }
+    if (!this.replayInProgress) {
+      void this.screenCaptureModel.target()
+          .model(SDK.EmulationModel.EmulationModel)
+          ?.overrideEmulateTouch(this.touchEnabled);
+    }
   }
 
   private stopCasting(): void {
@@ -241,9 +268,6 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     }
     this.isCasting = false;
     this.screenCaptureModel.stopScreencast();
-    for (const emulationModel of SDK.TargetManager.TargetManager.instance().models(SDK.EmulationModel.EmulationModel)) {
-      void emulationModel.overrideEmulateTouch(false);
-    }
     if (this.overlayModel) {
       this.overlayModel.setHighlighter(null);
     }
@@ -255,9 +279,23 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     }
     const generation = ++this.frameGeneration;
     const image = new Image();
-    image.onload = () => {
+    image.onload = async () => {
+      if (!this.browserViewport || metadata.deviceWidth !== this.browserViewport.width ||
+          metadata.deviceHeight !== this.browserViewport.height ||
+          image.naturalWidth !== this.imageElement.naturalWidth ||
+          image.naturalHeight !== this.imageElement.naturalHeight) {
+        await this.captureViewport();
+      }
       if (generation !== this.frameGeneration) {
         return;
+      }
+      if (this.browserViewport) {
+        this.browserViewport = {
+          width: metadata.deviceWidth,
+          height: metadata.deviceHeight,
+          deviceScaleFactor: this.browserViewport.deviceScaleFactor,
+        };
+        this.recordInputState();
       }
       this.imageElement = image;
       this.pageScaleFactor = metadata.pageScaleFactor;
@@ -317,6 +355,53 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this.stopCasting();
       this.startCasting();
     }
+  }
+
+  syncInputState(touchEnabled: boolean, viewport: BrowserViewport|null): void {
+    this.touchEnabled = touchEnabled;
+    if (viewport) {
+      this.browserViewport = {...viewport};
+    }
+    this.updateTouchControls();
+  }
+
+  recordInputState(): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.browserViewport) {
+      this.recordBrowserInput({type: 'viewport', ...this.browserViewport});
+    }
+    this.recordBrowserInput({type: 'touch', enabled: this.touchEnabled});
+  }
+
+  private async captureViewport(): Promise<void> {
+    if (this.disposed || this.replayInProgress || this.viewportCapture) {
+      return this.viewportCapture ?? undefined;
+    }
+    if (this.screenCaptureModel.target().model(SDK.DebuggerModel.DebuggerModel)?.isPaused()) {
+      return;
+    }
+    this.viewportCapture =
+        (async () => {
+          const result = await this.screenCaptureModel.target().runtimeAgent().invoke_evaluate({
+            expression: '({width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio})\n' +
+                '//# sourceURL=backdo-internal:///screencast-viewport',
+            returnByValue: true,
+            silent: true,
+            throwOnSideEffect: true,
+          });
+          const viewport = result.result?.value as BrowserViewport | undefined;
+          if (!result.getError() && !result.exceptionDetails && viewport && viewport.width > 0 && viewport.height > 0 &&
+              viewport.deviceScaleFactor > 0 && !this.replayInProgress && !this.disposed) {
+            this.browserViewport = viewport;
+            this.recordInputState();
+          }
+        })().catch(() => {})
+            .finally(() => {
+              this.viewportCapture = null;
+            });
+    return this.viewportCapture;
   }
 
   retainFrameFrom(previousView: ScreencastView): void {
@@ -424,7 +509,8 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   private handleBlurEvent(): void {
-    if (this.inputModel && this.mouseInputToggle?.disabled) {
+    if (!this.replayInProgress && !this.retainedFrame && !this.isGlassPaneActive() && !this.disposed &&
+        this.inputModel && this.mouseInputToggle?.disabled) {
       const event = new MouseEvent('mouseup');
       this.inputModel.emitMouseEvent(event, this.screenOffsetTop, this.screenZoom);
     }
@@ -764,34 +850,49 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this.touchInputToggle.addEventListener('click', this.#toggleTouchEmulation.bind(this, true), false);
       this.mouseInputToggle.addEventListener('click', this.#toggleTouchEmulation.bind(this, false), false);
       void this.requestNavigationHistory();
-      this.resourceTreeModel.addEventListener(
-          SDK.ResourceTreeModel.Events.PrimaryPageChanged, this.requestNavigationHistoryEvent, this);
-      this.resourceTreeModel.addEventListener(
-          SDK.ResourceTreeModel.Events.CachedResourcesLoaded, this.requestNavigationHistoryEvent, this);
+      this.modelListeners.push(
+          this.resourceTreeModel.addEventListener(
+              SDK.ResourceTreeModel.Events.PrimaryPageChanged, this.requestNavigationHistoryEvent, this),
+          this.resourceTreeModel.addEventListener(
+              SDK.ResourceTreeModel.Events.CachedResourcesLoaded, this.requestNavigationHistoryEvent, this),
+          this.resourceTreeModel.addEventListener(
+              SDK.ResourceTreeModel.Events.FrameResized, this.onTargetViewportChanged, this));
     }
   }
 
-  private navigateToHistoryEntry(offset: number): void {
-    if (!this.resourceTreeModel) {
+  private async navigateToHistoryEntry(offset: number): Promise<void> {
+    if (!this.resourceTreeModel || this.replayInProgress) {
       return;
     }
     const newIndex = (this.historyIndex || 0) + offset;
     if (!this.historyEntries || newIndex < 0 || newIndex >= this.historyEntries.length) {
       return;
     }
-    this.resourceTreeModel.navigateToHistoryEntry(this.historyEntries[newIndex]);
+    const entry = this.historyEntries[newIndex];
+    await this.captureViewport();
+    if (this.replayInProgress || this.disposed) {
+      return;
+    }
+    this.recordInputState();
+    this.recordBrowserInput({type: 'history', offset});
+    this.resourceTreeModel.navigateToHistoryEntry(entry);
     void this.requestNavigationHistory();
   }
 
-  private navigateReload(): void {
-    if (!this.resourceTreeModel) {
+  private async navigateReload(): Promise<void> {
+    if (!this.resourceTreeModel || this.replayInProgress) {
       return;
     }
+    await this.captureViewport();
+    if (this.replayInProgress || this.disposed) {
+      return;
+    }
+    this.recordInputState();
     this.resourceTreeModel.reloadPage();
   }
 
-  private navigationUrlKeyUp(event: KeyboardEvent): void {
-    if (event.key !== 'Enter') {
+  private async navigationUrlKeyUp(event: KeyboardEvent): Promise<void> {
+    if (event.key !== 'Enter' || this.replayInProgress) {
       return;
     }
     let url: string = this.navigationUrl.value;
@@ -802,22 +903,35 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       url = 'http://' + url;
     }
     if (this.resourceTreeModel) {
+      await this.captureViewport();
+      if (this.replayInProgress || this.disposed) {
+        return;
+      }
+      this.recordInputState();
+      this.recordBrowserInput({type: 'navigate', url});
       void this.resourceTreeModel.navigate(url as Platform.DevToolsPath.UrlString);
     }
     this.canvasElement.focus();
   }
 
   #toggleTouchEmulation(value: boolean): void {
-    if (!this.canvasContainerElement || !this.isCasting || !this.mouseInputToggle || !this.touchInputToggle ||
-        !this.mouseInputToggleIcon || !this.touchInputToggleIcon) {
+    if (this.replayInProgress || !this.canvasContainerElement || !this.isCasting || !this.mouseInputToggle ||
+        !this.touchInputToggle || !this.mouseInputToggleIcon || !this.touchInputToggleIcon) {
       return;
     }
-    const models = SDK.TargetManager.TargetManager.instance().models(SDK.EmulationModel.EmulationModel);
-    for (const model of models) {
-      void model.overrideEmulateTouch(value);
+    this.recordInputState();
+    this.recordBrowserInput({type: 'touch', enabled: value});
+    this.touchEnabled = value;
+    void this.screenCaptureModel.target().model(SDK.EmulationModel.EmulationModel)?.overrideEmulateTouch(value);
+    this.updateTouchControls();
+  }
+
+  private updateTouchControls(): void {
+    if (!this.mouseInputToggle || !this.touchInputToggle || !this.mouseInputToggleIcon || !this.touchInputToggleIcon) {
+      return;
     }
-    this.mouseInputToggle.disabled = !value;
-    this.touchInputToggle.disabled = value;
+    this.mouseInputToggle.disabled = !this.touchEnabled;
+    this.touchInputToggle.disabled = this.touchEnabled;
     this.mouseInputToggleIcon.data = {
       ...this.mouseInputToggleIcon.data,
       color: this.mouseInputToggle.disabled ? 'var(--icon-toggled)' : 'var(--icon-default)',
@@ -826,11 +940,16 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       ...this.touchInputToggleIcon.data,
       color: this.touchInputToggle.disabled ? 'var(--icon-toggled)' : 'var(--icon-default)',
     };
-    this.canvasContainerElement.classList.toggle('touchable', value);
+    this.canvasContainerElement?.classList.toggle('touchable', this.touchEnabled);
   }
 
   private requestNavigationHistoryEvent(): void {
+    void this.captureViewport();
     void this.requestNavigationHistory();
+  }
+
+  private onTargetViewportChanged(): void {
+    void this.captureViewport();
   }
 
   private async requestNavigationHistory(): Promise<void> {
@@ -868,6 +987,7 @@ export const HTTP_REGEX = /^http:\/\/(.+)/;
 export const SCHEME_REGEX = /^(https?|about|chrome):/;
 
 export class ProgressTracker {
+  private readonly listeners: Common.EventTarget.EventDescriptor[] = [];
   private element: HTMLElement;
   private requestIds: Map<string, SDK.NetworkRequest.NetworkRequest>|null;
   private startedRequests: number;
@@ -879,18 +999,24 @@ export class ProgressTracker {
       networkManager: SDK.NetworkManager.NetworkManager|null, element: HTMLElement) {
     this.element = element;
     if (resourceTreeModel) {
-      resourceTreeModel.addEventListener(
-          SDK.ResourceTreeModel.Events.PrimaryPageChanged, this.onPrimaryPageChanged, this);
-      resourceTreeModel.addEventListener(SDK.ResourceTreeModel.Events.Load, this.onLoad, this);
+      this.listeners.push(
+          resourceTreeModel.addEventListener(
+              SDK.ResourceTreeModel.Events.PrimaryPageChanged, this.onPrimaryPageChanged, this),
+          resourceTreeModel.addEventListener(SDK.ResourceTreeModel.Events.Load, this.onLoad, this));
     }
     if (networkManager) {
-      networkManager.addEventListener(SDK.NetworkManager.Events.RequestStarted, this.onRequestStarted, this);
-      networkManager.addEventListener(SDK.NetworkManager.Events.RequestFinished, this.onRequestFinished, this);
+      this.listeners.push(
+          networkManager.addEventListener(SDK.NetworkManager.Events.RequestStarted, this.onRequestStarted, this),
+          networkManager.addEventListener(SDK.NetworkManager.Events.RequestFinished, this.onRequestFinished, this));
     }
     this.requestIds = null;
     this.startedRequests = 0;
     this.finishedRequests = 0;
     this.maxDisplayedProgress = 0;
+  }
+
+  dispose(): void {
+    Common.EventTarget.removeEventListeners(this.listeners);
   }
 
   private onPrimaryPageChanged(): void {

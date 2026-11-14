@@ -244,22 +244,24 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     const scripts = [script, main, transit];
     sinon.stub(model, 'scripts').returns(scripts);
     (model.scriptForId as sinon.SinonStub).callsFake(id => scripts.find(script => script.scriptId === id));
-    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub).callsFake(async ({start}) => ({
-      locations: [0, 1].map(lineNumber => ({
-        scriptId: start.scriptId,
-        lineNumber,
-        columnNumber: 0,
-        type: start.scriptId === main.scriptId && lineNumber === 1 ?
-            Protocol.Debugger.BreakLocationType.DebuggerStatement : undefined,
-      })),
-      getError: () => undefined,
-    }));
+    (model.agent.invoke_getPossibleBreakpoints as sinon.SinonStub)
+        .callsFake(async ({start}) => ({
+                     locations: [0, 1].map(lineNumber => ({
+                                             scriptId: start.scriptId,
+                                             lineNumber,
+                                             columnNumber: 0,
+                                             type: start.scriptId === main.scriptId && lineNumber === 1 ?
+                                                 Protocol.Debugger.BreakLocationType.DebuggerStatement :
+                                                 undefined,
+                                           })),
+                     getError: () => undefined,
+                   }));
     const install = model.agent.invoke_setBreakpoint as sinon.SinonStub;
     install.callsFake(async ({location}) => ({
-      breakpointId: `${location.scriptId}:${location.lineNumber}`,
-      actualLocation: location,
-      getError: () => undefined,
-    }));
+                        breakpointId: `${location.scriptId}:${location.lineNumber}`,
+                        actualLocation: location,
+                        getError: () => undefined,
+                      }));
     sinon.stub(model.agent, 'invoke_resume').resolves({getError: () => undefined});
 
     await pause(model, script, 0);
@@ -647,8 +649,8 @@ async function pause(
     model: SDK.DebuggerModel.DebuggerModel, script: SDK.Script.Script,
     position: number|{lineNumber: number, columnNumber: number}, reason = Protocol.Debugger.PausedEventReason.Other,
     // 기본은 사용자가 보는 정지다. 내부 기록 정지는 호출부에서 기록용 ID만 전달한다.
-    breakpointIds: string[] = [String(typeof position === 'number' ? position : position.lineNumber), 'user-breakpoint']):
-    Promise<void> {
+    breakpointIds: string[] =
+        [String(typeof position === 'number' ? position : position.lineNumber), 'user-breakpoint']): Promise<void> {
   const location = typeof position === 'number' ? {lineNumber: position, columnNumber: 0} : position;
   await model.pausedScript(
       [{

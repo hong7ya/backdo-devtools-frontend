@@ -1443,9 +1443,9 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#recordingStart = {position, inputCount: inputCountAtPause};
       }
       const hitRecordingBreakpoint = details.breakpointIds.some(id => this.#recordingBreakpointIds.has(id));
+      const hitStep = Boolean(this.#pendingStep) && details.reason === Protocol.Debugger.PausedEventReason.Step;
       // Node의 시작 정지는 일반 중단점이 없는 import 앞에도 오며, --inspect-brk 재시작으로 재현된다.
-      if (!initial && !breakOnStart && !this.#pendingStep && !hitRecordingBreakpoint &&
-          !script.debuggerStatements.has(key)) {
+      if (!initial && !breakOnStart && !hitStep && !hitRecordingBreakpoint && !script.debuggerStatements.has(key)) {
         // XHR·예외 등은 같은 실행 위치에서 별도의 정지를 보낼 수 있다.
         // 복원 중에는 해제되는 사용자 정지를 실행 방문 횟수에 더하지 않는다.
         if (this.#isReplaying) {
@@ -1460,13 +1460,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       if (!script.positions.has(key) && !breakOnStart) {
         throw new Error('일반 브레이크포인트로 재현할 수 없는 정지 위치입니다.');
       }
-      // 기록용 ID만 있는 일반 정지만 숨긴다. XHR·DOM·이벤트·예외·수동 정지는 보존한다.
-      const onlyRecordingBreakpoint = details.reason === Protocol.Debugger.PausedEventReason.Other &&
-          details.breakpointIds.length > 0 && details.breakpointIds.every(id => this.#recordingBreakpointIds.has(id));
       const disposition = this.session.recordPause({
         position,
         depth: details.callFrames.length,
-        userVisible: Boolean(initial) || script.debuggerStatements.has(key) || !onlyRecordingBreakpoint,
+        userVisible: Boolean(initial) || script.debuggerStatements.has(key) || !this.#isRecordingPause(details),
       });
       this.#lastPosition = position;
       if (!this.#isReplaying) {
@@ -1507,6 +1504,23 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         this.#notifyProgress();
       }
     }
+  }
+
+  #isRecordingPause(details: SDK.DebuggerModel.DebuggerPausedDetails): boolean {
+    if (!details.breakpointIds.length || !details.breakpointIds.every(id => this.#recordingBreakpointIds.has(id))) {
+      return false;
+    }
+    if (details.reason === Protocol.Debugger.PausedEventReason.Other ||
+        details.reason === Protocol.Debugger.PausedEventReason.Step) {
+      return details.auxData === undefined;
+    }
+    // V8는 Step과 중단점이 겹치면 ambiguous로 보낸다. 다른 정지 이유가 섞이면 그대로 표시한다.
+    const reasons = details.reason === Protocol.Debugger.PausedEventReason.Ambiguous ? details.auxData?.reasons : null;
+    return Array.isArray(reasons) && reasons.length > 0 &&
+        reasons.every(
+            item => item !== null && typeof item === 'object' && item.auxData === undefined &&
+                (item.reason === Protocol.Debugger.PausedEventReason.Other ||
+                 item.reason === Protocol.Debugger.PausedEventReason.Step));
   }
 
   #finishRecordedPosition(): boolean {

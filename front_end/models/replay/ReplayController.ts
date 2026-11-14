@@ -43,7 +43,7 @@ interface ScopeChange {
   afterPosition: number;
   sources: string[];
   /** 새 파일에 실제로 멈춰 추가했다면, 재생에서도 이 진입점을 기다린다. */
-  entry?: ExecutionPosition;
+  entry?: {position: ExecutionPosition, step: boolean};
   inputCount: number;
 }
 
@@ -99,11 +99,11 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
   #selectedSources = new Set<string>();
   #scopeChanges: ScopeChange[] = [];
   #scopeChangeIndex = 0;
-  #scopeEntry: {change: ScopeChange, breakpointId: string}|null = null;
+  #scopeEntry: {change: ScopeChange, breakpointId?: string}|null = null;
   #scriptScopes = new Map<string, ScriptScope>();
   #preparedScopeSizes = new Map<string, number>();
   #steps: RecordedStep[] = [];
-  #pendingStep: RecordedStep|null = null;
+  #pendingStep: (RecordedStep&{functionId?: string})|null = null;
   #pausedDetails: SDK.DebuggerModel.DebuggerPausedDetails|undefined;
   #pendingConsoleInputs: Array<RecordedInput&ConsoleInput> = [];
   #debuggerModel: SDK.DebuggerModel.DebuggerModel|null = null;
@@ -1109,7 +1109,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     return scope;
   }
 
-  #selectSources(sources: string[], entry?: ExecutionPosition, inputCount = this.#inputs.length): void {
+  #selectSources(sources: string[], entry?: ScopeChange['entry'], inputCount = this.#inputs.length): void {
     const added = [...new Set(sources)].filter(source => !this.#selectedSources.has(source));
     if (!added.length) {
       return;
@@ -1135,8 +1135,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         return;
       }
       if (change.entry) {
+        // native Step으로 도착했던 위치에 중단점을 더하면 V8의 다음 정지 위치가 달라질 수 있다.
+        if (change.entry.step) {
+          this.#scopeEntry = {change};
+          return;
+        }
         if (!this.#scopeEntry) {
-          const {url, hash, lineNumber, columnNumber} = change.entry;
+          const {url, hash, lineNumber, columnNumber} = change.entry.position;
           const response = await model.agent.invoke_setBreakpointByUrl({
             ...(url.startsWith('backdo-console:///') ? {scriptHash: hash} : {url}),
             lineNumber,
@@ -1337,6 +1342,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       const frame = details.callFrames[0];
       this.#pausedDetails = details;
+      const nativeStep = Boolean(this.#pendingStep) && details.reason === Protocol.Debugger.PausedEventReason.Step &&
+          !details.breakpointIds.length && details.auxData === undefined;
+      if (nativeStep && !this.#reachedStepDestination(details.callFrames.length)) {
+        // 내부 중단점에서 빠져나오는 도중의 정지는 사용자 진입이나 기록 범위 확장이 아니다.
+        await this.#sendExecution('step-out');
+        return true;
+      }
       if (this.#entryBreakpoint) {
         if (!details.breakpointIds.includes(this.#entryBreakpoint)) {
           await this.#resumeExecution();
@@ -1381,7 +1393,7 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
         };
         if (this.#isReplaying) {
           const pending = this.#scopeEntry;
-          if (pending?.change.entry && samePosition(pending.change.entry, position)) {
+          if (pending?.change.entry && samePosition(pending.change.entry.position, position)) {
             this.#notifyProgress();
             while (this.#replayActive(generation) && this.#replayInputCount < pending.change.inputCount) {
               await new Promise<void>(resolve => this.#progressListeners.add(resolve));
@@ -1389,25 +1401,30 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
             if (!this.#replayActive(generation)) {
               return true;
             }
-            const removed = await modelAtPause.agent.invoke_removeBreakpoint({
+            const removed = pending.breakpointId ? await modelAtPause.agent.invoke_removeBreakpoint({
               breakpointId: pending.breakpointId as Protocol.Debugger.BreakpointId,
-            });
+            }) : undefined;
             if (epochAtPause !== this.#documentEpoch || modelAtPause !== this.#debuggerModel ||
                 !this.#replayActive(generation)) {
               return true;
             }
-            if (removed.getError()) {
+            if (removed?.getError()) {
               throw new Error(removed.getError());
             }
-            this.#recordingBreakpointIds.delete(pending.breakpointId);
+            if (pending.breakpointId) {
+              this.#recordingBreakpointIds.delete(pending.breakpointId);
+            }
             this.#scopeEntry = null;
             this.#selectSources(pending.change.sources);
             this.#scopeChangeIndex++;
           }
         } else if (!scope.includes(location, this.#selectedSources) && this.#scriptFilter(frame.script)) {
           // 이 경로에는 실제 사용자 정지만 온다. 기록용 중단점은 선택된 위치에만 설치한다.
-          this.#selectSources(
-              [scope.sourceAt(location)], this.session.history.length ? position : undefined, inputCountAtPause);
+          const entry = this.session.history.length ? {
+            position,
+            step: nativeStep,
+          } : undefined;
+          this.#selectSources([scope.sourceAt(location)], entry, inputCountAtPause);
         }
       }
       await this.#prepareRecordingScripts(scopeSize !== this.#selectedSources.size);
@@ -1463,7 +1480,8 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const disposition = this.session.recordPause({
         position,
         depth: details.callFrames.length,
-        userVisible: Boolean(initial) || script.debuggerStatements.has(key) || !this.#isRecordingPause(details),
+        userVisible: Boolean(initial) || Boolean(this.#pendingStep && this.#reachedStepDestination(details.callFrames.length)) ||
+            script.debuggerStatements.has(key) || !this.#isRecordingPause(details),
       });
       this.#lastPosition = position;
       if (!this.#isReplaying) {
@@ -1559,10 +1577,10 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       const step = {
         afterPosition: this.session.history.length,
         command,
-        depth: this.#debuggerModel?.debuggerPausedDetails()?.callFrames.length ?? 0,
+        depth: this.#pausedDetails?.callFrames.length ?? 0,
       };
       this.#steps.push(step);
-      this.#pendingStep = step;
+      this.#pendingStep = {...step, functionId: this.#currentFunctionId()};
     }
     this.#notifyStatusChanged();
     // 중단점을 추가한 뒤 실행하는 경우도 이 정지 경계부터 범위에 포함한다.
@@ -1616,6 +1634,23 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
     }
   }
 
+  #currentFunctionId(): string|undefined {
+    const frame = this.#pausedDetails?.callFrames[0];
+    return frame?.functionLocation()?.id() ?? frame?.script.scriptId;
+  }
+
+  #reachedStepDestination(depth: number): boolean {
+    const step = this.#pendingStep;
+    if (!step || step.command === 'step-into' || depth < step.depth) {
+      return true;
+    }
+    if (depth > step.depth) {
+      return false;
+    }
+    // 모듈 실행은 이전 함수에서 나와도 같은 호출 깊이에 도착할 수 있다.
+    return step.command === 'step-over' || step.functionId !== this.#currentFunctionId();
+  }
+
   async #continueExecution(depth: number): Promise<void> {
     if (this.#isReplaying) {
       const scopeSize = this.#selectedSources.size;
@@ -1625,16 +1660,13 @@ export class ReplayController extends Common.ObjectWrapper.ObjectWrapper<EventTy
       }
       const step = this.#steps.find(item => item.afterPosition === this.#replayedPositions);
       if (step) {
-        this.#pendingStep = step;
+        this.#pendingStep = {...step, functionId: this.#currentFunctionId()};
         await this.#sendExecution(step.command);
         return;
       }
     }
     if (this.#pendingStep) {
-      const step = this.#pendingStep;
-      const reached =
-          step.command === 'step-into' || (step.command === 'step-over' ? depth <= step.depth : depth < step.depth);
-      if (!reached) {
+      if (!this.#reachedStepDestination(depth)) {
         // 기록용 중단점이 native Step을 끊었으면 호출 스택 밖으로 나가는 Step을 계속한다.
         await this.#sendExecution('step-out');
         return;

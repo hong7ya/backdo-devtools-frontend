@@ -8,6 +8,7 @@ import * as SDK from '../../core/sdk/sdk.js';
 import * as Replay from '../../models/replay/replay.js';
 import * as UI from '../../ui/legacy/legacy.js';
 
+import {Events as InputEvents, InputModel, type UserInputEvent} from './InputModel.js';
 import {ScreencastView} from './ScreencastView.js';
 
 const UIStrings = {
@@ -27,6 +28,7 @@ export class ScreencastApp implements Common.App.App,
   private rootSplitWidget?: UI.SplitWidget.SplitWidget;
   private screenCaptureModel?: SDK.ScreenCaptureModel.ScreenCaptureModel;
   private screencastView?: ScreencastView;
+  private readonly inputListeners: Common.EventTarget.EventDescriptor[] = [];
   rootView?: UI.RootView.RootView;
   constructor() {
     this.enabledSetting = Common.Settings.Settings.instance().createSetting('screencast-enabled', true);
@@ -67,16 +69,23 @@ export class ScreencastApp implements Common.App.App,
       return;
     }
     this.screenCaptureModel = screenCaptureModel;
+    Common.EventTarget.removeEventListeners(this.inputListeners);
+    const inputModel = screenCaptureModel.target().model(InputModel);
+    if (inputModel) {
+      this.inputListeners.push(inputModel.addEventListener(InputEvents.USER_INPUT, this.onUserInput, this));
+    }
     this.toggleButton.setEnabled(true);
     const previousView = this.screencastView;
-    const replaying = Replay.ReplayController.ReplayController.instance().busy;
-    this.screencastView = new ScreencastView(screenCaptureModel);
+    const controller = Replay.ReplayController.ReplayController.instance();
+    const replaying = controller.busy;
+    this.screencastView = new ScreencastView(screenCaptureModel, input => controller.recordBrowserInput(input));
     this.screencastView.initialize();
+    this.screencastView.syncInputState(controller.browserTouchEnabled, controller.browserViewport);
     if (replaying && previousView) {
       this.screencastView.retainFrameFrom(previousView);
     }
     this.screencastView.setReplayInProgress(replaying);
-    previousView?.detach();
+    previousView?.dispose();
     if (this.rootSplitWidget) {
       this.rootSplitWidget.setMainWidget(this.screencastView);
     }
@@ -87,6 +96,7 @@ export class ScreencastApp implements Common.App.App,
     if (this.screenCaptureModel !== screenCaptureModel) {
       return;
     }
+    Common.EventTarget.removeEventListeners(this.inputListeners);
     delete this.screenCaptureModel;
     this.toggleButton.setEnabled(false);
     if (Replay.ReplayController.ReplayController.instance().busy && this.screencastView) {
@@ -99,20 +109,29 @@ export class ScreencastApp implements Common.App.App,
 
   private clearScreencastView(): void {
     if (this.screencastView) {
-      this.screencastView.detach();
+      this.screencastView.dispose();
       delete this.screencastView;
     }
     this.onScreencastEnabledChanged();
   }
 
   private onReplayStateChanged(): void {
-    const busy = Replay.ReplayController.ReplayController.instance().busy;
+    const controller = Replay.ReplayController.ReplayController.instance();
+    const busy = controller.busy;
     if (!busy && !this.screenCaptureModel && this.screencastView) {
       // 새 대상이 만들어지지 못한 경우에는 이전 프레임을 계속 연결된 화면처럼 남기지 않는다.
       this.clearScreencastView();
       return;
     }
+    if (!controller.session.error) {
+      this.screencastView?.syncInputState(controller.browserTouchEnabled, controller.browserViewport);
+    }
     this.screencastView?.setReplayInProgress(busy);
+  }
+
+  private onUserInput(event: Common.EventTarget.EventTargetEvent<UserInputEvent>): void {
+    this.screencastView?.recordInputState();
+    Replay.ReplayController.ReplayController.instance().recordBrowserInput(event.data.input, event.data.completion);
   }
 
   private toggleButtonClicked(): void {

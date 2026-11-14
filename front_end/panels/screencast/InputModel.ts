@@ -19,7 +19,25 @@ const MOUSE_EVENT_TYPES: {[key: string]: Protocol.Input.DispatchMouseEventReques
   mousemove: Protocol.Input.DispatchMouseEventRequestType.MouseMoved,
 };
 
-export class InputModel extends SDK.SDKModel.SDKModel<void> {
+export const enum Events {
+  USER_INPUT = 'UserInput',
+}
+
+export type UserInput = {
+  type: 'mouse',
+  params: Protocol.Input.DispatchMouseEventRequest,
+}|{type: 'key', params: Protocol.Input.DispatchKeyEventRequest};
+
+export interface UserInputEvent {
+  input: UserInput;
+  completion: Promise<void>;
+}
+
+interface EventTypes {
+  [Events.USER_INPUT]: UserInputEvent;
+}
+
+export class InputModel extends SDK.SDKModel.SDKModel<EventTypes> {
   private readonly inputAgent: ProtocolProxyApi.InputApi;
   private activeMouseOffsetTop: number|null;
 
@@ -45,7 +63,7 @@ export class InputModel extends SDK.SDKModel.SDKModel<void> {
         return;
     }
     const text = event.type === 'keypress' ? String.fromCharCode(event.charCode) : undefined;
-    void this.inputAgent.invoke_dispatchKeyEvent({
+    const params: Protocol.Input.DispatchKeyEventRequest = {
       type,
       modifiers: this.modifiersForEvent(event),
       text,
@@ -54,12 +72,12 @@ export class InputModel extends SDK.SDKModel.SDKModel<void> {
       code: event.code,
       key: event.key,
       windowsVirtualKeyCode: event.keyCode,
-      nativeVirtualKeyCode: event.keyCode,
       autoRepeat: event.repeat,
       isKeypad: event.location === 3,
       isSystemKey: false,
       location: event.location !== 3 ? event.location : undefined,
-    });
+    };
+    this.dispatchInput({type: 'key', params});
   }
 
   emitMouseEvent(event: MouseEvent, offsetTop: number, zoom: number): void {
@@ -69,14 +87,16 @@ export class InputModel extends SDK.SDKModel.SDKModel<void> {
     if (event.type === 'mousedown' || this.activeMouseOffsetTop === null) {
       this.activeMouseOffsetTop = offsetTop;
     }
-    void this.inputAgent.invoke_dispatchMouseEvent({
+    const params: Protocol.Input.DispatchMouseEventRequest = {
       type: MOUSE_EVENT_TYPES[event.type],
       x: Math.round(event.offsetX / zoom),
       y: Math.round(event.offsetY / zoom - this.activeMouseOffsetTop),
       modifiers: this.modifiersForEvent(event),
       button: BUTTONS[event.button],
+      buttons: event.buttons,
       clickCount: event.detail,
-    });
+    };
+    this.dispatchInput({type: 'mouse', params});
     if (event.type === 'mouseup') {
       this.activeMouseOffsetTop = null;
     }
@@ -86,16 +106,26 @@ export class InputModel extends SDK.SDKModel.SDKModel<void> {
     if (this.activeMouseOffsetTop === null) {
       this.activeMouseOffsetTop = offsetTop;
     }
-    void this.inputAgent.invoke_dispatchMouseEvent({
+    const params: Protocol.Input.DispatchMouseEventRequest = {
       type: Protocol.Input.DispatchMouseEventRequestType.MouseWheel,
       x: Math.round(event.offsetX / zoom),
       y: Math.round(event.offsetY / zoom - this.activeMouseOffsetTop),
       modifiers: this.modifiersForEvent(event),
       button: BUTTONS[event.button],
+      buttons: event.buttons,
       clickCount: event.detail,
       deltaX: event.deltaX / zoom,
       deltaY: event.deltaY / zoom,
-    });
+    };
+    this.dispatchInput({type: 'mouse', params});
+  }
+
+  private dispatchInput(input: UserInput): void {
+    const completion = Promise.withResolvers<void>();
+    this.dispatchEventToListeners(Events.USER_INPUT, {input, completion: completion.promise});
+    const response = input.type === 'key' ? this.inputAgent.invoke_dispatchKeyEvent(input.params) :
+                                            this.inputAgent.invoke_dispatchMouseEvent(input.params);
+    void response.then(() => completion.resolve());
   }
 
   private modifiersForEvent(event: KeyboardEvent|MouseEvent): number {

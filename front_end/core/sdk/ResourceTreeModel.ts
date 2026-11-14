@@ -430,7 +430,7 @@ export class ResourceTreeModel extends SDKModel<EventTypes> {
     if (networkManager) {
       networkManager.clearRequests();
     }
-    this.dispatchEventToListeners(Events.WillReloadPage);
+    this.dispatchEventToListeners(Events.WillReloadPage, {ignoreCache, scriptToEvaluateOnLoad});
     void this.agent.invoke_reload({ignoreCache, scriptToEvaluateOnLoad, loaderId});
   }
 
@@ -649,7 +649,7 @@ export interface EventTypes {
   [Events.LifecycleEvent]: {frameId: Protocol.Page.FrameId, name: string};
   [Events.Load]: {resourceTreeModel: ResourceTreeModel, loadTime: number};
   [Events.PageReloadRequested]: ResourceTreeModel;
-  [Events.WillReloadPage]: void;
+  [Events.WillReloadPage]: {ignoreCache?: boolean, scriptToEvaluateOnLoad?: string}|void;
   [Events.InterstitialShown]: void;
   [Events.InterstitialHidden]: void;
   [Events.BackForwardCacheDetailsUpdated]: ResourceTreeFrame;

@@ -436,15 +436,15 @@ describeWithMockConnection('공통 재실행 제어기', () => {
     assert.isNull(controller.estimatedReplayMs);
   });
 
-  it('실행 컨텍스트가 교체되면 이전 입력과 위치를 비우고 새 기록을 받는다', () => {
+  it('브라우저 문서가 교체되어도 같은 세션의 입력 기록을 유지한다', () => {
     const {controller, target, model} = createControllerTarget({kind: 'console'});
     recordConsoleCommand(target, 'const first = 1;');
     model.globalObjectCleared();
-    assert.strictEqual(controller.inputCount, 0);
+    assert.strictEqual(controller.inputCount, 1);
     assert.lengthOf(controller.session.history, 0);
     assert.isNull(controller.session.error);
     recordConsoleCommand(target, 'const next = 2;');
-    assert.strictEqual(controller.inputCount, 1);
+    assert.strictEqual(controller.inputCount, 2);
   });
 
   it('진행 중인 복원은 유지하고 진행이 멈춘 경우에만 대기를 종료한다', async () => {
@@ -542,13 +542,14 @@ function recordConsoleCommand(target: SDK.Target.Target, expression: string): vo
     context: {id: 1, origin: '', name: '', uniqueId: 'context', auxData: {isDefault: true}},
   });
   const context = target.model(SDK.RuntimeModel.RuntimeModel)!.defaultExecutionContext()!;
-  target.model(SDK.ConsoleModel.ConsoleModel)!.dispatchEventToListeners(
-      SDK.ConsoleModel.Events.CommandWillBeEvaluated, {
-        executionContext: context,
-        expression,
-        useCommandLineAPI: true,
-        userGesture: false,
-      });
+  const consoleModel = target.model(SDK.ConsoleModel.ConsoleModel)!;
+  consoleModel.dispatchEventToListeners(SDK.ConsoleModel.Events.CommandWillBeEvaluated, {
+    commandMessage: consoleModel.addCommandMessage(context, expression),
+    executionContext: context,
+    expression,
+    useCommandLineAPI: true,
+    userGesture: false,
+  });
 }
 
 async function pause(

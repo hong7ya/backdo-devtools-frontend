@@ -75,8 +75,11 @@ export class ReplaySession {
       return 'show';
     }
     this.#isAtRecordedPause = this.#shouldShowPause(pause);
-    // Step Over·Out이 건너뛴 위치는 재실행 경로에만 남긴다. Resume 경로는 계속 되짚을 수 있다.
-    this.history.record(pause.position, this.#isAtRecordedPause || this.#executionCommand === 'resume');
+    // Resume는 모든 기록 위치를, Step Out은 빠져나오는 함수의 실행 위치를 되짚는다.
+    // Step Over가 건너뛴 함수 내부는 재실행 검증 경로에만 남긴다.
+    const reverseTarget = this.#isAtRecordedPause || this.#executionCommand === 'resume' ||
+        (this.#executionCommand === 'step-out' && pause.depth <= this.#stepStartDepth);
+    this.history.record(pause.position, reverseTarget);
     return this.#isAtRecordedPause ? 'show' : 'continue';
   }
 
